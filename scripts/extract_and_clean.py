@@ -273,6 +273,38 @@ def get_fixture_direct(home_target: str, away_target: str) -> Dict[str, Any]:
     )
 
 
+def upsert_partido(record_es: Dict[str, Any], record_en: Dict[str, Any]) -> None:
+    """Intenta guardar en 'partidos' y si no existe, en 'matches'."""
+    last_err = None
+    for table_name, payload in (
+        ("partidos", record_es),
+        ("Partidos", record_es),
+        ("matches", record_en),
+    ):
+        try:
+            supabase.table(table_name).upsert(payload, on_conflict="fixture_id").execute()
+            print(f"✅ Guardado en tabla '{table_name}'")
+            return
+        except Exception as e:
+            last_err = e
+            continue
+    raise Exception(f"Fallo al guardar partido en partidos/matches: {last_err}")
+
+
+def insert_prediccion(record_pred: Dict[str, Any]) -> None:
+    """Inserta en 'predicciones' (nombre real en minúsculas)."""
+    last_err = None
+    for table_name in ("predicciones", "Predicciones"):
+        try:
+            supabase.table(table_name).insert(record_pred).execute()
+            print(f"✅ Guardado en tabla '{table_name}'")
+            return
+        except Exception as e:
+            last_err = e
+            continue
+    raise Exception(f"Fallo al guardar en predicciones: {last_err}")
+
+
 def process_single_match(home_target: str, away_target: str):
     try:
         fixture = get_fixture_direct(home_target, away_target)
@@ -297,8 +329,8 @@ def process_single_match(home_target: str, away_target: str):
         l_home = calculate_lambda(estimate_base_xg(home, league, True), True, 0.0, vol)
         l_away = calculate_lambda(estimate_base_xg(away, league, False), False, 0.0, vol)
 
-        # 1) Guardar en Partidos
-        record_partido = {
+        # Payloads para Partidos (ES) y matches (EN)
+        record_es = {
             "fixture_id": fix_id,
             "home_team": home,
             "away_team": away,
@@ -310,41 +342,32 @@ def process_single_match(home_target: str, away_target: str):
             "estado": f"quant_processed_{status_short}",
             "updated_at": consulta_bogota,
         }
+        record_en = {
+            "fixture_id": fix_id,
+            "home_team": home,
+            "away_team": away,
+            "league": league,
+            "kickoff": kickoff_bogota,
+            "volatility": vol,
+            "lambda_home": l_home,
+            "lambda_away": l_away,
+            "status": f"quant_processed_{status_short}",
+            "updated_at": consulta_bogota,
+        }
 
         print("\n💾 Guardando métricas en Partidos...")
         for attempt in range(3):
             try:
-                supabase.table("Partidos").upsert(
-                    record_partido, on_conflict="fixture_id"
-                ).execute()
+                upsert_partido(record_es, record_en)
                 break
             except Exception as db_err:
-                # fallback por si la tabla se llama matches
-                try:
-                    supabase.table("matches").upsert(
-                        {
-                            "fixture_id": fix_id,
-                            "home_team": home,
-                            "away_team": away,
-                            "league": league,
-                            "kickoff": kickoff_bogota,
-                            "volatility": vol,
-                            "lambda_home": l_home,
-                            "lambda_away": l_away,
-                            "status": f"quant_processed_{status_short}",
-                            "updated_at": consulta_bogota,
-                        },
-                        on_conflict="fixture_id",
-                    ).execute()
-                    break
-                except Exception:
-                    if attempt < 2:
-                        print(f"⚠️ Latencia Supabase (intento {attempt+1}). Reintentando...")
-                        time.sleep(4)
-                    else:
-                        raise Exception(f"Fallo al guardar en Partidos/matches: {db_err}")
+                if attempt < 2:
+                    print(f"⚠️ Latencia Supabase (intento {attempt+1}). Reintentando...")
+                    time.sleep(4)
+                else:
+                    raise Exception(f"Fallo definitivo al guardar partido: {db_err}")
 
-        # 2) Monte Carlo en Vercel
+        # Monte Carlo en Vercel
         print("🚀 Lanzando simulación Monte Carlo (10k) en Vercel...")
         payload = {
             "fixture_id": fix_id,
@@ -372,7 +395,7 @@ def process_single_match(home_target: str, away_target: str):
         if not pred:
             raise Exception("No se obtuvo predicción desde Vercel")
 
-        # 3) Guardar en Predicciones (formato de tu tabla)
+        # Guardar en predicciones (formato de tu tabla)
         prob_local = float(pred.get("prob_home", 0)) * 100
         prob_empate = float(pred.get("prob_draw", 0)) * 100
         prob_visita = float(pred.get("prob_away", 0)) * 100
@@ -391,19 +414,19 @@ def process_single_match(home_target: str, away_target: str):
             "top_marcador": top_marcador,
         }
 
-        print("💾 Guardando resultado en Predicciones...")
+        print("💾 Guardando resultado en predicciones...")
         for attempt in range(3):
             try:
-                supabase.table("Predicciones").insert(record_pred).execute()
+                insert_prediccion(record_pred)
                 break
             except Exception as db_err:
                 if attempt < 2:
-                    print(f"⚠️ Latencia Supabase Predicciones (intento {attempt+1})...")
+                    print(f"⚠️ Latencia Supabase predicciones (intento {attempt+1})...")
                     time.sleep(4)
                 else:
-                    raise Exception(f"Fallo al guardar en Predicciones: {db_err}")
+                    raise Exception(f"Fallo al guardar en predicciones: {db_err}")
 
-        print("✅ Predicción guardada en Supabase (tabla Predicciones)")
+        print("✅ Predicción guardada en Supabase (tabla predicciones)")
         print(f"   Horario partido (Bogotá): {kickoff_bogota}")
         print(f"   Horario consulta (Bogotá): {consulta_bogota}")
 
@@ -414,7 +437,7 @@ def process_single_match(home_target: str, away_target: str):
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("PIPELINE QUANT V6.8 – PREDICCIONES + HORA BOGOTÁ")
+    print("PIPELINE QUANT V6.9 – predicciones + hora Bogotá")
     print("=" * 75)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 75)
