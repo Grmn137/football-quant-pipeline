@@ -2,6 +2,7 @@ import os
 import requests
 import time
 import json
+import re
 from datetime import datetime, timezone
 from typing import Tuple, Dict, Any, List
 from supabase import create_client, Client
@@ -27,42 +28,75 @@ HEADERS_API = {
     "Content-Type": "application/json",
 }
 
-# ====================== INGRESO DE EQUIPOS ======================
+# ====================== PARTIDO A PROCESAR ======================
 TARGET_HOME = "Independiente Santa Fe"
 TARGET_AWAY = "Tolima"
 
-# Solo aliases verificados. Agrega aquí equipos que uses mucho en el torneo.
+# Aliases verificados / candidatos fuertes (multi-liga)
+# Si un alias falla validación de nombre, se ignora y se busca por texto.
 TEAM_ALIASES = {
+    # Colombia
+    "independiente santa fe": 1139,
+    "santa fe": 1139,
     "tolima": 1142,
     "deportes tolima": 1142,
+
+    # Ejemplos multi-país (descomenta/agrega según tu torneo):
     # "real madrid": 541,
     # "barcelona": 529,
     # "manchester city": 50,
+    # "porto": 212,
+    # "benfica": 211,
     # "boca juniors": 451,
     # "river plate": 435,
     # "flamengo": 127,
+    # "palmeiras": 121,
+    # "america": 2287,  # ten cuidado: hay varios "América"
 }
 
 # ====================== UTILIDADES ======================
+def normalize(text: str) -> str:
+    text = (text or "").lower().strip()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
 def determine_volatility(league_name: str) -> str:
-    league = (league_name or "").lower()
+    league = normalize(league_name)
 
-    high_volatility = [
+    high = [
         "colombia", "betplay", "dimayor",
-        "argentina", "liga profesional", "primera división",
+        "argentina", "liga profesional",
         "mexico", "liga mx", "ascenso",
-        "brazil", "brasil", "brasileirão", "serie a", "serie b",
+        "brazil", "brasil", "brasileirao", "serie a", "serie b",
     ]
-    medium_high = [
-        "portugal", "liga portugal", "segunda liga",
-        "turkey", "süper lig", "greece", "super league",
-    ]
+    medium = ["portugal", "liga portugal", "segunda liga", "turkey", "greece"]
 
-    if any(x in league for x in high_volatility):
+    if any(x in league for x in high):
         return "Alta"
-    if any(x in league for x in medium_high):
+    if any(x in league for x in medium):
         return "Media-Alta"
     return "Baja-Media"
+
+
+def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
+    league = normalize(league)
+
+    if any(x in league for x in ["colombia", "betplay", "dimayor"]):
+        return 1.18 if is_home else 1.05
+    if any(x in league for x in ["argentina", "liga profesional"]):
+        return 1.15 if is_home else 1.02
+    if any(x in league for x in ["mexico", "liga mx"]):
+        return 1.22 if is_home else 1.08
+    if any(x in league for x in ["brazil", "brasil", "brasileirao"]):
+        return 1.28 if is_home else 1.12
+    if any(x in league for x in ["portugal", "liga portugal"]):
+        return 1.35 if is_home else 1.15
+    if any(x in league for x in ["premier", "la liga", "serie a", "bundesliga", "ligue 1"]):
+        return 1.45 if is_home else 1.25
+
+    return 1.25 if is_home else 1.10
 
 
 def calculate_lambda(
@@ -76,25 +110,6 @@ def calculate_lambda(
         lambda_val *= 1.07 if volatility == "Alta" else 1.10
     lambda_val += injury_impact
     return round(max(0.55, min(lambda_val, 2.45)), 3)
-
-
-def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
-    league = (league or "").lower()
-
-    if any(x in league for x in ["colombia", "betplay", "dimayor"]):
-        return 1.18 if is_home else 1.05
-    if any(x in league for x in ["argentina", "liga profesional"]):
-        return 1.15 if is_home else 1.02
-    if any(x in league for x in ["mexico", "liga mx"]):
-        return 1.22 if is_home else 1.08
-    if any(x in league for x in ["brazil", "brasil", "brasileirão"]):
-        return 1.28 if is_home else 1.12
-    if any(x in league for x in ["portugal", "liga portugal"]):
-        return 1.35 if is_home else 1.15
-    if any(x in league for x in ["premier", "la liga", "serie a", "bundesliga"]):
-        return 1.45 if is_home else 1.25
-
-    return 1.25 if is_home else 1.10
 
 
 def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
@@ -115,56 +130,98 @@ def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
                 raise
 
 
-# ====================== BUSCADOR UNIVERSAL ======================
-def search_team_id(team_target: str) -> Tuple[int, str]:
-    target_lower = team_target.lower().strip()
+def score_team_name(target: str, candidate_name: str) -> int:
+    t = normalize(target)
+    n = normalize(candidate_name)
+    score = 0
 
+    if t == n:
+        score += 120
+    elif t in n or n in t:
+        score += 70
+
+    t_tokens = [x for x in t.split() if len(x) > 2]
+    n_tokens = set(n.split())
+    score += sum(18 for tok in t_tokens if tok in n_tokens)
+
+    # Penaliza confusiones típicas
+    if "nacional" in n and "santa fe" in t:
+        score -= 80
+    if "leones negros" in n and "santa fe" in t:
+        score -= 80
+    if "union" in n and "independiente santa fe" in t:
+        score -= 40
+
+    return score
+
+
+def search_queries_for(team_target: str) -> List[str]:
+    t = team_target.strip()
+    variants = [
+        t,
+        t.replace("Independiente ", "").replace("Deportes ", "").strip(),
+        " ".join(t.split()[-2:]) if len(t.split()) >= 2 else t,
+        t.split()[0] if t.split() else t,
+    ]
+    # únicos preservando orden
+    out = []
+    for v in variants:
+        if v and v not in out and len(v) >= 3:
+            out.append(v)
+    return out
+
+
+def search_team_id(team_target: str) -> Tuple[int, str]:
+    target_lower = normalize(team_target)
+
+    # 1) Alias con validación de nombre
     if target_lower in TEAM_ALIASES:
         team_id = TEAM_ALIASES[target_lower]
-        print(f"⚡ Usando alias verificado para '{team_target}' (ID: {team_id})")
+        print(f"⚡ Probando alias para '{team_target}' (ID: {team_id})")
         data = safe_request(f"https://v3.football.api-sports.io/teams?id={team_id}")
         if data.get("response"):
             team = data["response"][0]["team"]
-            return team["id"], team["name"]
+            alias_score = score_team_name(team_target, team["name"])
+            print(f"   Alias resolvió: {team['name']} | score={alias_score}")
+            if alias_score >= 50:
+                return team["id"], team["name"]
+            print("   ⚠️ Alias no confiable, se busca por texto...")
 
-    print(f"🔍 Buscando: '{team_target}'...")
-    data = safe_request(f"https://v3.football.api-sports.io/teams?search={team_target}")
+    # 2) Búsqueda multi-query (multi-país / multi-liga)
+    candidates_map: Dict[int, Dict[str, Any]] = {}
 
-    candidates: List[Dict] = []
-    for item in data.get("response", []):
-        team = item["team"]
-        name = team["name"]
-        country = team.get("country", "Unknown")
-        name_lower = name.lower()
+    for q in search_queries_for(team_target):
+        print(f"🔍 Buscando: '{q}'...")
+        data = safe_request(f"https://v3.football.api-sports.io/teams?search={q}")
+        for item in data.get("response", []):
+            team = item["team"]
+            tid = team["id"]
+            name = team["name"]
+            country = team.get("country", "Unknown")
+            sc = score_team_name(team_target, name)
 
-        score = 0
-        if target_lower == name_lower:
-            score += 100
-        elif target_lower in name_lower:
-            score += 60
-        elif name_lower in target_lower:
-            score += 40
+            prev = candidates_map.get(tid)
+            if (prev is None) or (sc > prev["score"]):
+                candidates_map[tid] = {
+                    "id": tid,
+                    "name": name,
+                    "country": country,
+                    "score": sc,
+                }
 
-        keywords = target_lower.split()
-        matched_keywords = sum(1 for k in keywords if k in name_lower)
-        score += matched_keywords * 15
-
-        candidates.append(
-            {"id": team["id"], "name": name, "country": country, "score": score}
-        )
-
+    candidates = sorted(candidates_map.values(), key=lambda x: x["score"], reverse=True)
     if not candidates:
         raise ValueError(f"No se encontró ningún equipo para '{team_target}'")
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-
     print(f"\n📋 Top candidatos para '{team_target}':")
-    for i, c in enumerate(candidates[:8], 1):
+    for i, c in enumerate(candidates[:10], 1):
         print(f"   {i}. {c['name']} (ID: {c['id']}) | {c['country']} | Score: {c['score']}")
 
     best = candidates[0]
-    if best["score"] < 50:
-        print(f"\n⚠️ Score bajo ({best['score']}). Revisa los candidatos.")
+    if best["score"] < 40:
+        raise ValueError(
+            f"Match poco confiable para '{team_target}'. Mejor candidato: {best['name']} (score={best['score']})"
+        )
 
     print(f"\n✅ Seleccionado: {best['name']} (ID: {best['id']}) | País: {best['country']}")
     return best["id"], best["name"]
@@ -183,19 +240,17 @@ def get_fixture_direct(home_target: str, away_target: str) -> Dict[str, Any]:
     if matches:
         now = datetime.now(timezone.utc).timestamp()
         closest = min(matches, key=lambda x: abs(x["fixture"]["timestamp"] - now))
-        print(f"📌 Partido H2H más cercano encontrado (ID: {closest['fixture']['id']})")
+        print(f"📌 Partido H2H más cercano (ID: {closest['fixture']['id']})")
         return closest
 
     print("⚠️ Sin H2H. Buscando próximo enfrentamiento entre ambos...")
     for team_id in [home_id, away_id]:
         fixtures_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=30"
         fixtures = safe_request(fixtures_url).get("response", [])
-
         for fix in fixtures:
             teams = fix["teams"]
-            if (teams["home"]["id"] == home_id and teams["away"]["id"] == away_id) or (
-                teams["home"]["id"] == away_id and teams["away"]["id"] == home_id
-            ):
+            ids = {teams["home"]["id"], teams["away"]["id"]}
+            if home_id in ids and away_id in ids:
                 print(f"📌 Fixture próximo encontrado (ID: {fix['fixture']['id']})")
                 return fix
 
@@ -260,9 +315,8 @@ def process_single_match(home_target: str, away_target: str):
                 },
                 timeout=35,
             )
-
             if v_res.status_code in (200, 201):
-                print("🏆 ¡Análisis cuantitativo completado con éxito!\n")
+                print("🏆 ¡Análisis cuantitativo completado!\n")
                 print(json.dumps(v_res.json(), indent=2))
             else:
                 print(f"⚠️ Error Vercel ({v_res.status_code}): {v_res.text[:600]}")
@@ -276,7 +330,7 @@ def process_single_match(home_target: str, away_target: str):
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("PIPELINE QUANT V6.6 – MULTI-LIGA / MULTI-PAÍS (SIN SESGO)")
+    print("PIPELINE QUANT V6.7 – MULTI-LIGA + SEARCH ROBUSTO")
     print("=" * 75)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 75)
