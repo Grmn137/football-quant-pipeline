@@ -19,7 +19,7 @@ HEADERS_API = {
 }
 
 # ====================== INGRESO DE EQUIPOS ======================
-TARGET_HOME = "Santa Fe"
+TARGET_HOME = "Independiente Santa Fe"
 TARGET_AWAY = "Tolima"
 
 # ====================== FUNCIONES DE UTILIDAD ======================
