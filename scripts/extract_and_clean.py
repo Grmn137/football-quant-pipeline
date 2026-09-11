@@ -19,8 +19,8 @@ HEADERS_API = {
 }
 
 # ====================== INGRESO DE EQUIPOS ======================
-TARGET_HOME = "Rennes"
-TARGET_AWAY = "Marseille"
+TARGET_HOME = "Santa Fe"
+TARGET_AWAY = "Tolima"
 
 # ====================== FUNCIONES DE UTILIDAD ======================
 def determine_volatility(league_name: str) -> str:
