@@ -1,75 +1,104 @@
 import os
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from supabase import create_client, Client
-from bs4 import BeautifulSoup
-import json
+from typing import Dict, Optional
 
 # ====================== CONFIGURACIÓN ======================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Importante: usar service_role
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")       # Opcional
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+HEADERS_API = {
+    "x-apisports-key": API_FOOTBALL_KEY
 }
 
-# ====================== FUNCIONES DE FUENTES ÉLITE ======================
-
-def get_understat_npxg(team_name: str, league: str = "EPL"):
-    """
-    Intento de extracción de npxG desde Understat.
-    Nota: Understat tiene protección, por lo que en producción se recomienda
-    usar una capa intermedia o datos pre-cargados.
-    """
-    # Placeholder de alta calidad (en producción se reemplaza por scraping real o API)
-    # Aquí devolvemos estructura lista para ser reemplazada
-    return {
-        "npxg": None,
-        "npxga": None,
-        "source": "understat"
-    }
-
+# ====================== FUNCIONES DE UTILIDAD ======================
 
 def determine_volatility(league_name: str) -> str:
+    """Clasificación de volatilidad optimizada para el torneo"""
     league = league_name.lower()
-    if any(x in league for x in ["colombia", "argentina", "ecuador", "betplay", "liga profesional", "dimayor"]):
+    
+    if any(x in league for x in [
+        "colombia", "betplay", "dimayor",
+        "argentina", "liga profesional", "lpfe",
+        "ecuador", "liga pro", "serie a ecuador"
+    ]):
         return "Alta"
-    if any(x in league for x in ["brasil", "brazil", "brasileirão", "serie a"]):
+    
+    if any(x in league for x in ["brasil", "brazil", "brasileirão", "serie a brazil", "serie a betano"]):
         return "Media-Alta"
+    
     return "Baja-Media"
 
 
-def calculate_lambda(npxg: float, is_home: bool = True, injury_impact: float = 0.0) -> float:
-    base = npxg if npxg else 1.20
+def calculate_lambda(
+    base_xg: float,
+    is_home: bool = True,
+    injury_impact: float = 0.0,
+    volatility: str = "Alta"
+) -> float:
+    """
+    Cálculo de λ optimizado para ligas sudamericanas.
+    Más conservador en ligas de alta volatilidad.
+    """
+    lambda_val = base_xg
+
+    # Ajuste de localía (más moderado en Sudamérica)
     if is_home:
-        base *= 1.08   # Ajuste localía conservador
-    base += injury_impact
-    return round(max(min(base, 2.8), 0.45), 3)
+        if volatility == "Alta":
+            lambda_val *= 1.07
+        else:
+            lambda_val *= 1.10
+
+    # Impacto de lesiones
+    lambda_val += injury_impact
+
+    # Límites de seguridad (evitar valores extremos)
+    lambda_val = max(0.55, min(lambda_val, 2.45))
+
+    return round(lambda_val, 3)
 
 
-def get_fixtures_from_api_football(date: str = None):
-    """Fuente base de fixtures (API-Football)"""
+def get_fixtures_today() -> list:
+    """Obtiene los fixtures del día desde API-Football"""
     if not API_FOOTBALL_KEY:
-        print("No hay API_FOOTBALL_KEY configurada")
+        print("ERROR: No hay API_FOOTBALL_KEY configurada")
         return []
 
-    if date is None:
-        date = datetime.utcnow().strftime("%Y-%m-%d")
-
-    url = f"https://v3.football.api-sports.io/fixtures?date={date}"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    url = f"https://v3.football.api-sports.io/fixtures?date={today}"
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=HEADERS_API, timeout=20)
         data = response.json()
         return data.get("response", [])
     except Exception as e:
-        print(f"Error API-Football: {e}")
+        print(f"Error obteniendo fixtures: {e}")
         return []
+
+
+def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
+    """
+    Estimación base de xG cuando no hay datos de Understat/FBref.
+    Valores calibrados para ligas sudamericanas (más bajos que Europa).
+    """
+    # Valores promedio realistas por tipo de liga
+    if "colombia" in league.lower() or "betplay" in league.lower():
+        base = 1.18 if is_home else 1.05
+    elif "argentina" in league.lower():
+        base = 1.15 if is_home else 1.02
+    elif "ecuador" in league.lower():
+        base = 1.20 if is_home else 1.08
+    elif "brasil" in league.lower() or "brazil" in league.lower():
+        base = 1.28 if is_home else 1.12
+    else:
+        base = 1.25 if is_home else 1.10
+
+    return base
 
 
 def process_fixture(fixture: dict):
@@ -82,20 +111,28 @@ def process_fixture(fixture: dict):
 
         volatility = determine_volatility(league)
 
-        # === AQUÍ SE INTEGRAN LAS FUENTES ÉLITE ===
-        # Por ahora usamos valores base realistas + estructura lista
-        # para conectar Understat / FBref más adelante
+        # === ESTIMACIÓN DE npxG (optimizada para LATAM) ===
+        # En el futuro aquí se puede conectar FBref o Sofascore
+        npxg_home = estimate_base_xg(home, league, is_home=True)
+        npxga_home = estimate_base_xg(away, league, is_home=False)  # aproximación
+        npxg_away = estimate_base_xg(away, league, is_home=False)
+        npxga_away = estimate_base_xg(home, league, is_home=True)
 
-        npxg_home = 1.32
-        npxga_home = 1.18
-        npxg_away = 1.15
-        npxga_away = 1.38
-
-        # Impacto de lesiones (se puede enriquecer con Transfermarkt)
+        # Impacto de lesiones (se puede enriquecer después)
         injuries_impact = {}
 
-        lambda_home = calculate_lambda(npxg_home, is_home=True)
-        lambda_away = calculate_lambda(npxg_away, is_home=False)
+        lambda_home = calculate_lambda(
+            base_xg=npxg_home,
+            is_home=True,
+            injury_impact=0.0,
+            volatility=volatility
+        )
+        lambda_away = calculate_lambda(
+            base_xg=npxg_away,
+            is_home=False,
+            injury_impact=0.0,
+            volatility=volatility
+        )
 
         record = {
             "fixture_id": fixture_id,
@@ -115,30 +152,34 @@ def process_fixture(fixture: dict):
             "updated_at": datetime.utcnow().isoformat()
         }
 
-        # Upsert en Supabase
+        # Guardar en Supabase
         supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
-        print(f"✓ {home} vs {away} | λ: {lambda_home} - {lambda_away} | {volatility}")
+        
+        print(f"✓ {home} vs {away}")
+        print(f"   Liga: {league} | Volatilidad: {volatility}")
+        print(f"   λ → {lambda_home} - {lambda_away}")
 
     except Exception as e:
-        print(f"Error procesando fixture {fixture.get('fixture', {}).get('id')}: {e}")
+        print(f"Error procesando fixture: {e}")
 
 
 def main():
-    print("=" * 60)
-    print(f"Iniciando extracción élite - {datetime.utcnow()}")
-    print("=" * 60)
+    print("=" * 65)
+    print(f"EXTRACCIÓN LATAM OPTIMIZADA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+    print("=" * 65)
 
-    fixtures = get_fixtures_from_api_football()
-    print(f"Partidos encontrados: {len(fixtures)}")
+    fixtures = get_fixtures_today()
+    print(f"Partidos encontrados hoy: {len(fixtures)}\n")
 
-    for i, fixture in enumerate(fixtures, 1):
-        print(f"[{i}/{len(fixtures)}] ", end="")
+    processed = 0
+    for fixture in fixtures:
         process_fixture(fixture)
-        time.sleep(1.1)  # Rate limit respetuoso
+        processed += 1
+        time.sleep(1.15)  # Respetar rate limit
 
-    print("=" * 60)
-    print("Extracción finalizada")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print(f"Proceso finalizado. Partidos procesados: {processed}")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
