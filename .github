@@ -1,1 +1,38 @@
-workflows/run-pipeline.yml
+name: Football Quant Pipeline
+
+on:
+  # Permite ejecutarlo manualmente desde la pestaña "Actions"
+  workflow_dispatch:
+  
+  # Opcional: Programación automática diaria
+  schedule:
+    - cron: '0 10 * * *'
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Descargar el código del repositorio
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Configurar el entorno de Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. Instalar librerías necesarias (como requests)
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      # 4. Ejecutar el script ubicado dentro de la carpeta scripts/
+      - name: Run extraction and cleaning script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          python scripts/extract_and_clean.py
