@@ -6,7 +6,7 @@ from datetime import datetime
 from supabase import create_client, Client
 
 # ====================== CONFIGURACIÓN ======================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mqtfiupwtolrbmojiwgz.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 VERCEL_API_URL = os.getenv("VERCEL_API_URL", "https://football-quant-pipeline.vercel.app/api/predict")
@@ -21,6 +21,14 @@ HEADERS_API = {
 # ====================== INGRESO DE EQUIPOS ======================
 TARGET_HOME = "Independiente Santa Fe"
 TARGET_AWAY = "Tolima"
+
+# Diccionario de respaldo por ID directo para evitar fallos de texto en API-Football
+TEAM_ALIASES = {
+    "independiente santa fe": 2307,
+    "santa fe": 2307,
+    "tolima": 1142,
+    "deportes tolima": 1142
+}
 
 # ====================== FUNCIONES DE UTILIDAD ======================
 def determine_volatility(league_name: str) -> str:
@@ -48,12 +56,24 @@ def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
 
 # ====================== BUSCADOR H2H DEFINITIVO ======================
 def search_team_id(team_target: str) -> tuple:
+    target_lower = team_target.lower().strip()
+    
+    # Verificación directa por alias si el buscador textual falla
+    if target_lower in TEAM_ALIASES:
+        team_id = TEAM_ALIASES[target_lower]
+        print(f"⚡ Usando alias directo para '{team_target}' (ID: {team_id})...")
+        # Consultamos el nombre oficial mediante el ID para mantener la consistencia
+        res = requests.get(f"https://v3.football.api-sports.io/teams?id={team_id}", headers=HEADERS_API, timeout=15).json()
+        if res.get("response"):
+            return team_id, res["response"][0]["team"]["name"]
+
     clean_target = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
     for q in list(dict.fromkeys([team_target, clean_target])):
         print(f"🔍 Consultando API-Football para: '{q}'...")
         res = requests.get(f"https://v3.football.api-sports.io/teams?search={q}", headers=HEADERS_API, timeout=15).json()
         if res.get("response"):
             return res["response"][0]["team"]["id"], res["response"][0]["team"]["name"]
+            
     raise ValueError(f"No se pudo encontrar el equipo '{team_target}'.")
 
 def get_fixture_direct(home_target: str, away_target: str) -> dict:
