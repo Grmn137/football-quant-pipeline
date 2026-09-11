@@ -6,13 +6,11 @@ function factorial(n) {
   return acc;
 }
 
-// Cálculo de la probabilidad de Poisson (modelo Dixon-Coles simplificado)
 function poissonProbability(k, lambda) {
   return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
 }
 
-module.exports = (req, res) => {
-  // Validar método HTTP POST
+module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     return res.status(405).json({ error: `Método ${req.method} no permitido. Utilice POST.` });
@@ -21,7 +19,6 @@ module.exports = (req, res) => {
   try {
     const { npxg_local, npxg_visita, penal_local, penal_visita } = req.body || {};
     
-    // Aplicar protocolo Anti-GIGO y deducciones por ausencias
     const lambdaLocal = Math.max(0.1, (npxg_local || 1.5) - (penal_local || 0));
     const lambdaVisita = Math.max(0.1, (npxg_visita || 1.2) - (penal_visita || 0));
 
@@ -31,7 +28,6 @@ module.exports = (req, res) => {
     
     const exactScores = [];
 
-    // Generar matriz de probabilidades de goles (hasta 6 goles por equipo)
     for (let h = 0; h <= 6; h++) {
       for (let a = 0; a <= 6; a++) {
         const pHome = poissonProbability(h, lambdaLocal);
@@ -46,24 +42,52 @@ module.exports = (req, res) => {
       }
     }
 
-    // Ordenar y extraer el Top 5 de marcadores más probables
     exactScores.sort((a, b) => b.probability - a.probability);
     const topScores = exactScores.slice(0, 5).map(item => ({
       marcador: item.score,
       probabilidad_porcentaje: Number((item.probability * 100).toFixed(2))
     }));
 
+    const pLocalPct = Number((probLocalWin * 100).toFixed(2));
+    const pDrawPct = Number((probDraw * 100).toFixed(2));
+    const pAwayPct = Number((probAwayWin * 100).toFixed(2));
+    const topMarcadorStr = topScores.length > 0 ? topScores[0].marcador : "0-0";
+
+    // Guardar en Supabase usando fetch nativo si las credenciales existen
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+    if (supabaseUrl && supabaseKey) {
+      await fetch(`${supabaseUrl}/rest/v1/predictions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify({
+          npxg_local: lambdaLocal,
+          npxg_visita: lambdaVisita,
+          prob_local: pLocalPct,
+          prob_empate: pDrawPct,
+          prob_visita: pAwayPct,
+          top_marcador: topMarcadorStr
+        })
+      });
+    }
+
     return res.status(200).json({
       status: "success",
-      engine: "Native Node.js Poisson",
+      engine: "Native Node.js Poisson + Supabase DB",
       expected_goals_ajustados: {
         local: Number(lambdaLocal.toFixed(2)),
         visita: Number(lambdaVisita.toFixed(2))
       },
       probabilidades_1x2: {
-        local_porcentaje: Number((probLocalWin * 100).toFixed(2)),
-        empate_porcentaje: Number((probDraw * 100).toFixed(2)),
-        visita_porcentaje: Number((probAwayWin * 100).toFixed(2))
+        local_porcentaje: pLocalPct,
+        empate_porcentaje: pDrawPct,
+        visita_porcentaje: pAwayPct
       },
       top_marcadores_exactos: topScores
     });
@@ -71,7 +95,7 @@ module.exports = (req, res) => {
   } catch (error) {
     return res.status(500).json({
       status: "error",
-      message: "Fallo en el cálculo matemático nativo",
+      message: "Fallo en el cálculo o guardado en base de datos",
       details: error.message
     });
   }
