@@ -21,7 +21,8 @@ HEADERS_API = {
 }
 
 # ====================== INGRESO DE EQUIPOS ======================
-TARGET_HOME = "Stade Rennais"
+# Usamos 'Rennes' que es el nombre exacto registrado en la base de datos de la API
+TARGET_HOME = "Rennes"
 TARGET_AWAY = "Marsella"
 
 
@@ -62,16 +63,12 @@ def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
 # ====================== MOTOR DE BÚSQUEDA ELITE ======================
 
 def search_team_id(team_target: str) -> tuple:
-    """Busca el ID del equipo probando el nombre original y variantes comunes."""
-    queries = [team_target]
-    
-    # Agregar variantes inteligentes (ej: quitar 'Stade ', 'FC ', etc.)
-    cleaned = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
-    if cleaned != team_target:
-        queries.append(cleaned)
+    """Busca el ID del equipo en la API con múltiples estrategias de limpieza."""
+    clean_target = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
+    queries = list(dict.fromkeys([team_target, clean_target])) # Sin duplicados
     
     for q in queries:
-        print(f"🔍 Probando búsqueda en API-Football con: '{q}'...")
+        print(f"🔍 Consultando API-Football para: '{q}'...")
         team_url = f"https://v3.football.api-sports.io/teams?search={q}"
         team_res = requests.get(team_url, headers=HEADERS_API, timeout=15).json()
         
@@ -79,24 +76,24 @@ def search_team_id(team_target: str) -> tuple:
             team_data = team_res["response"][0]["team"]
             return team_data["id"], team_data["name"]
             
-    raise ValueError(f"No se pudo encontrar el equipo '{team_target}' en ninguna variante.")
+    raise ValueError(f"No se pudo encontrar el equipo '{team_target}' en la API.")
 
 def fuzzy_match(target: str, name: str) -> bool:
     t_clean = target.lower().strip()
     n_clean = name.lower().strip()
     if t_clean in n_clean or n_clean in t_clean:
         return True
-    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.60
+    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.55
 
 def get_fixture_by_names(home_target: str, away_target: str) -> dict:
     if not API_FOOTBALL_KEY:
         raise ValueError("ERROR: API_FOOTBALL_KEY no configurada.")
 
     team_id, real_name = search_team_id(home_target)
-    print(f"✅ ¡Encontrado! Usando registro oficial: {real_name} (ID: {team_id})")
+    print(f"✅ ¡Encontrado! Registro oficial: {real_name} (ID: {team_id})")
     
     print(f"🗓️ Escaneando próximos partidos buscando cruce contra '{away_target}'...")
-    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=20"
+    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=25"
     fix_res = requests.get(fix_url, headers=HEADERS_API, timeout=15).json()
     
     for match in fix_res.get("response", []):
@@ -106,7 +103,7 @@ def get_fixture_by_names(home_target: str, away_target: str) -> dict:
         if fuzzy_match(away_target, api_home) or fuzzy_match(away_target, api_away):
             return match
             
-    raise ValueError(f"Se encontró al equipo pero no hay un partido próximo programado contra '{away_target}' en las siguientes jornadas.")
+    raise ValueError(f"Se encontró a {real_name} pero no hay partidos próximos contra '{away_target}' en las siguientes 25 jornadas.")
 
 def process_single_match(home_target: str, away_target: str):
     try:
@@ -161,7 +158,7 @@ def process_single_match(home_target: str, away_target: str):
 
 def main():
     print("=" * 65)
-    print(f"PIPELINE QUANT V6.1 - BÚSQUEDA ROBUSTA")
+    print(f"PIPELINE QUANT V6.1 - BÚSQUEDA CORREGIDA")
     print("=" * 65)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 65)
