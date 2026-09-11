@@ -1,9 +1,12 @@
 {
   "name": "football-quant-pipeline",
   "version": "1.0.0",
-  "description": "API serverless para motor cuantitativo Dixon-Coles",
-  "main": "api/predict.js",
+  "description": "Pipeline quant para predicción de fútbol",
+  "main": "index.js",
   "scripts": {
-    "start": "node api/predict.js"
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0"
   }
 }
