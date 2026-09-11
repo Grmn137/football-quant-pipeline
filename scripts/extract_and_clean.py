@@ -32,8 +32,7 @@ HEADERS_API = {
 TARGET_HOME = "Independiente Santa Fe"
 TARGET_AWAY = "Tolima"
 
-# Aliases verificados / candidatos fuertes (multi-liga)
-# Si un alias falla validación de nombre, se ignora y se busca por texto.
+# Aliases verificados (multi-liga). Agrega aquí los del torneo cuando los confirmes.
 TEAM_ALIASES = {
     # Colombia
     "independiente santa fe": 1139,
@@ -41,7 +40,7 @@ TEAM_ALIASES = {
     "tolima": 1142,
     "deportes tolima": 1142,
 
-    # Ejemplos multi-país (descomenta/agrega según tu torneo):
+    # Ejemplos multi-país (descomenta/agrega según uses):
     # "real madrid": 541,
     # "barcelona": 529,
     # "manchester city": 50,
@@ -51,7 +50,6 @@ TEAM_ALIASES = {
     # "river plate": 435,
     # "flamengo": 127,
     # "palmeiras": 121,
-    # "america": 2287,  # ten cuidado: hay varios "América"
 }
 
 # ====================== UTILIDADES ======================
@@ -163,7 +161,6 @@ def search_queries_for(team_target: str) -> List[str]:
         " ".join(t.split()[-2:]) if len(t.split()) >= 2 else t,
         t.split()[0] if t.split() else t,
     ]
-    # únicos preservando orden
     out = []
     for v in variants:
         if v and v not in out and len(v) >= 3:
@@ -304,17 +301,18 @@ def process_single_match(home_target: str, away_target: str):
                     raise Exception(f"Fallo definitivo al guardar en BD: {db_err}")
 
         print("🚀 Lanzando simulación Monte Carlo (10k) en Vercel...")
+        payload = {
+            "fixture_id": fix_id,
+            "home_team": home,
+            "away_team": away,
+            "league": league,
+            "volatility": vol,
+            "lambda_home": l_home,
+            "lambda_away": l_away,
+        }
+
         try:
-            v_res = requests.post(
-                VERCEL_API_URL,
-                json={
-                    "home_team": home,
-                    "away_team": away,
-                    "lambda_home": l_home,
-                    "lambda_away": l_away,
-                },
-                timeout=35,
-            )
+            v_res = requests.post(VERCEL_API_URL, json=payload, timeout=35)
             if v_res.status_code in (200, 201):
                 print("🏆 ¡Análisis cuantitativo completado!\n")
                 print(json.dumps(v_res.json(), indent=2))
@@ -330,7 +328,7 @@ def process_single_match(home_target: str, away_target: str):
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("PIPELINE QUANT V6.7 – MULTI-LIGA + SEARCH ROBUSTO")
+    print("PIPELINE QUANT V6.7 – MULTI-LIGA + SEARCH ROBUSTO + FIXTURE_ID")
     print("=" * 75)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 75)
