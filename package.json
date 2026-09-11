@@ -1,1 +1,9 @@
-
+{
+  "name": "football-quant-pipeline",
+  "version": "1.0.0",
+  "description": "API serverless para motor cuantitativo Dixon-Coles",
+  "main": "api/predict.js",
+  "scripts": {
+    "start": "node api/predict.js"
+  }
+}
