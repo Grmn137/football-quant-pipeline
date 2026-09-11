@@ -21,7 +21,6 @@ HEADERS_API = {
 }
 
 # ====================== INGRESO DE EQUIPOS ======================
-# Modifica únicamente estas dos variables para cada partido del torneo
 TARGET_HOME = "Stade Rennais"
 TARGET_AWAY = "Marsella"
 
@@ -29,9 +28,7 @@ TARGET_AWAY = "Marsella"
 # ====================== FUNCIONES DE UTILIDAD ======================
 
 def determine_volatility(league_name: str) -> str:
-    """Clasificación de volatilidad optimizada para el torneo"""
     league = league_name.lower()
-    
     if any(x in league for x in ["colombia", "betplay", "dimayor", "argentina", "liga profesional", "lpfe", "ecuador", "liga pro", "serie a ecuador"]):
         return "Alta"
     if any(x in league for x in ["brasil", "brazil", "brasileirão", "serie a brazil", "serie a betano"]):
@@ -39,7 +36,6 @@ def determine_volatility(league_name: str) -> str:
     return "Baja-Media"
 
 def calculate_lambda(base_xg: float, is_home: bool = True, injury_impact: float = 0.0, volatility: str = "Alta") -> float:
-    """Cálculo de λ optimizado para ligas sudamericanas y alta volatilidad."""
     lambda_val = base_xg
     if is_home:
         if volatility == "Alta":
@@ -51,7 +47,6 @@ def calculate_lambda(base_xg: float, is_home: bool = True, injury_impact: float 
     return round(lambda_val, 3)
 
 def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
-    """Estimación base de xG calibrada para LATAM y el resto del mundo."""
     if "colombia" in league.lower() or "betplay" in league.lower():
         return 1.18 if is_home else 1.05
     elif "argentina" in league.lower():
@@ -66,32 +61,42 @@ def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
 
 # ====================== MOTOR DE BÚSQUEDA ELITE ======================
 
+def search_team_id(team_target: str) -> tuple:
+    """Busca el ID del equipo probando el nombre original y variantes comunes."""
+    queries = [team_target]
+    
+    # Agregar variantes inteligentes (ej: quitar 'Stade ', 'FC ', etc.)
+    cleaned = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
+    if cleaned != team_target:
+        queries.append(cleaned)
+    
+    for q in queries:
+        print(f"🔍 Probando búsqueda en API-Football con: '{q}'...")
+        team_url = f"https://v3.football.api-sports.io/teams?search={q}"
+        team_res = requests.get(team_url, headers=HEADERS_API, timeout=15).json()
+        
+        if team_res.get("response"):
+            team_data = team_res["response"][0]["team"]
+            return team_data["id"], team_data["name"]
+            
+    raise ValueError(f"No se pudo encontrar el equipo '{team_target}' en ninguna variante.")
+
 def fuzzy_match(target: str, name: str) -> bool:
-    """Tolerancia a fallos: Empareja 'Marsella' con 'Marseille' o 'Ind. Santa Fe' con 'Independiente'."""
     t_clean = target.lower().strip()
     n_clean = name.lower().strip()
     if t_clean in n_clean or n_clean in t_clean:
         return True
-    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.65
+    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.60
 
 def get_fixture_by_names(home_target: str, away_target: str) -> dict:
-    """Triangula el partido exacto buscando el ID del equipo y escaneando su calendario."""
     if not API_FOOTBALL_KEY:
-        raise ValueError("ERROR: API_FOOTBALL_KEY no configurada en los Secrets de GitHub.")
+        raise ValueError("ERROR: API_FOOTBALL_KEY no configurada.")
 
-    print(f"🔍 1. Triangulando ID en API-Football para: '{home_target}'...")
-    team_url = f"https://v3.football.api-sports.io/teams?search={home_target}"
-    team_res = requests.get(team_url, headers=HEADERS_API, timeout=15).json()
+    team_id, real_name = search_team_id(home_target)
+    print(f"✅ ¡Encontrado! Usando registro oficial: {real_name} (ID: {team_id})")
     
-    if not team_res.get("response"):
-        raise ValueError(f"No se encontró el equipo '{home_target}'. Revisa la ortografía.")
-    
-    team_id = team_res["response"][0]["team"]["id"]
-    real_name = team_res["response"][0]["team"]["name"]
-    print(f"✅ Equipo detectado: {real_name} (ID: {team_id})")
-    
-    print(f"🗓️ 2. Escaneando calendario buscando cruce contra '{away_target}'...")
-    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=15"
+    print(f"🗓️ Escaneando próximos partidos buscando cruce contra '{away_target}'...")
+    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=20"
     fix_res = requests.get(fix_url, headers=HEADERS_API, timeout=15).json()
     
     for match in fix_res.get("response", []):
@@ -101,7 +106,7 @@ def get_fixture_by_names(home_target: str, away_target: str) -> dict:
         if fuzzy_match(away_target, api_home) or fuzzy_match(away_target, api_away):
             return match
             
-    raise ValueError(f"No se encontró ningún partido próximo programado contra {away_target}.")
+    raise ValueError(f"Se encontró al equipo pero no hay un partido próximo programado contra '{away_target}' en las siguientes jornadas.")
 
 def process_single_match(home_target: str, away_target: str):
     try:
@@ -114,7 +119,6 @@ def process_single_match(home_target: str, away_target: str):
         kickoff = fixture["fixture"]["date"]
         volatility = determine_volatility(league)
 
-        # Cálculo algorítmico de Lambdas
         npxg_home = estimate_base_xg(home, league, is_home=True)
         npxg_away = estimate_base_xg(away, league, is_home=False)
         lambda_home = calculate_lambda(npxg_home, True, 0.0, volatility)
@@ -133,13 +137,11 @@ def process_single_match(home_target: str, away_target: str):
             "updated_at": datetime.utcnow().isoformat()
         }
 
-        # Paso 1: Persistencia de datos limpios
-        print(f"💾 3. Guardando métricas en Supabase...")
+        print(f"💾 Guardando métricas en Supabase...")
         supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
         print(f"   ✓ Partido: {home} vs {away} | Liga: {league} | λ: {lambda_home} - {lambda_away}")
 
-        # Paso 2: Ejecución del modelo predictivo en Vercel
-        print(f"🚀 4. Desplegando simulación Monte Carlo (10k) en Vercel...")
+        print(f"🚀 Desplegando simulación Monte Carlo (10k) en Vercel...")
         vercel_payload = {
             "home_team": home,
             "away_team": away,
@@ -159,7 +161,7 @@ def process_single_match(home_target: str, away_target: str):
 
 def main():
     print("=" * 65)
-    print(f"PIPELINE QUANT V6.1 - EXTRACCIÓN Y SIMULACIÓN INDIVIDUAL")
+    print(f"PIPELINE QUANT V6.1 - BÚSQUEDA ROBUSTA")
     print("=" * 65)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 65)
