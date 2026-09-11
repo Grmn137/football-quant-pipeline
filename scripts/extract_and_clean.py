@@ -32,8 +32,8 @@ HEADERS_API = {
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 
 # ====================== PARTIDO A PROCESAR ======================
-TARGET_HOME = os.getenv("TARGET_HOME", "Independiente Santa Fe")
-TARGET_AWAY = os.getenv("TARGET_AWAY", "Tolima")
+TARGET_HOME = os.getenv("TARGET_HOME", "Boca Juniors")
+TARGET_AWAY = os.getenv("TARGET_AWAY", "Central Cordoba")
 
 TEAM_ALIASES = {
     "independiente santa fe": 1139,
