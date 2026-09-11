@@ -21,9 +21,8 @@ HEADERS_API = {
 }
 
 # ====================== INGRESO DE EQUIPOS ======================
-# Usamos 'Rennes' que es el nombre exacto registrado en la base de datos de la API
 TARGET_HOME = "Rennes"
-TARGET_AWAY = "Marsella"
+TARGET_AWAY = "Marseille"
 
 
 # ====================== FUNCIONES DE UTILIDAD ======================
@@ -60,12 +59,11 @@ def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
         return 1.25 if is_home else 1.10
 
 
-# ====================== MOTOR DE BÚSQUEDA ELITE ======================
+# ====================== MOTOR DE BÚSQUEDA ELITE (HÍBRIDO) ======================
 
 def search_team_id(team_target: str) -> tuple:
-    """Busca el ID del equipo en la API con múltiples estrategias de limpieza."""
     clean_target = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
-    queries = list(dict.fromkeys([team_target, clean_target])) # Sin duplicados
+    queries = list(dict.fromkeys([team_target, clean_target]))
     
     for q in queries:
         print(f"🔍 Consultando API-Football para: '{q}'...")
@@ -83,27 +81,36 @@ def fuzzy_match(target: str, name: str) -> bool:
     n_clean = name.lower().strip()
     if t_clean in n_clean or n_clean in t_clean:
         return True
-    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.55
+    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.45
 
 def get_fixture_by_names(home_target: str, away_target: str) -> dict:
     if not API_FOOTBALL_KEY:
         raise ValueError("ERROR: API_FOOTBALL_KEY no configurada.")
 
-    team_id, real_name = search_team_id(home_target)
-    print(f"✅ ¡Encontrado! Registro oficial: {real_name} (ID: {team_id})")
+    home_id, home_real = search_team_id(home_target)
+    away_id, away_real = search_team_id(away_target)
+    print(f"✅ Localizado: {home_real} (ID: {home_id}) vs {away_real} (ID: {away_id})")
     
-    print(f"🗓️ Escaneando próximos partidos buscando cruce contra '{away_target}'...")
-    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=25"
-    fix_res = requests.get(fix_url, headers=HEADERS_API, timeout=15).json()
+    # ESTRATEGIA HÍBRIDA: Buscamos tanto en partidos en vivo/hoy como en los próximos del calendario
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    endpoints = [
+        f"https://v3.football.api-sports.io/fixtures?team={home_id}&date={today_str}", # Partidos de hoy (en vivo o por jugar)
+        f"https://v3.football.api-sports.io/fixtures?team={home_id}&next=25"          # Próximos partidos
+    ]
     
-    for match in fix_res.get("response", []):
-        api_home = match["teams"]["home"]["name"]
-        api_away = match["teams"]["away"]["name"]
+    for fix_url in endpoints:
+        print(f"🗓️ Consultando calendario (Endpoint: {'hoy' if 'date' in fix_url else 'próximos'})...")
+        fix_res = requests.get(fix_url, headers=HEADERS_API, timeout=15).json()
         
-        if fuzzy_match(away_target, api_home) or fuzzy_match(away_target, api_away):
-            return match
+        for match in fix_res.get("response", []):
+            m_home_id = match["teams"]["home"]["id"]
+            m_away_id = match["teams"]["away"]["id"]
             
-    raise ValueError(f"Se encontró a {real_name} pero no hay partidos próximos contra '{away_target}' en las siguientes 25 jornadas.")
+            if (m_home_id == home_id and m_away_id == away_id) or \
+               (fuzzy_match(away_target, match["teams"]["home"]["name"]) or fuzzy_match(away_target, match["teams"]["away"]["name"])):
+                return match
+                
+    raise ValueError(f"No se encontró un partido activo o próximo programado entre {home_real} y {away_real}.")
 
 def process_single_match(home_target: str, away_target: str):
     try:
@@ -114,7 +121,10 @@ def process_single_match(home_target: str, away_target: str):
         away = fixture["teams"]["away"]["name"]
         league = fixture["league"]["name"]
         kickoff = fixture["fixture"]["date"]
+        status_short = fixture["fixture"]["status"]["short"]
         volatility = determine_volatility(league)
+
+        print(f"📌 Estado actual del partido en la API: {status_short}")
 
         npxg_home = estimate_base_xg(home, league, is_home=True)
         npxg_away = estimate_base_xg(away, league, is_home=False)
@@ -130,7 +140,7 @@ def process_single_match(home_target: str, away_target: str):
             "volatility": volatility,
             "lambda_home": lambda_home,
             "lambda_away": lambda_away,
-            "status": "quant_processed",
+            "status": f"quant_processed_{status_short}",
             "updated_at": datetime.utcnow().isoformat()
         }
 
@@ -158,7 +168,7 @@ def process_single_match(home_target: str, away_target: str):
 
 def main():
     print("=" * 65)
-    print(f"PIPELINE QUANT V6.1 - BÚSQUEDA CORREGIDA")
+    print(f"PIPELINE QUANT V6.1 - BUSCADOR HÍBRIDO (EN VIVO / PRE-PARTIDO)")
     print("=" * 65)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 65)
