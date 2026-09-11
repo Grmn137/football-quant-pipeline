@@ -3,7 +3,7 @@ import requests
 import time
 import json
 from datetime import datetime, timezone
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Dict, Any, List
 from supabase import create_client, Client
 
 # ====================== CONFIGURACIÓN ======================
@@ -26,28 +26,42 @@ HEADERS_API = {
 TARGET_HOME = "Independiente Santa Fe"
 TARGET_AWAY = "Tolima"
 
-# IDs CORRECTOS (verificados) + aliases robustos
+# Solo aliases 100% verificados (puedes ir agregando los que uses más)
 TEAM_ALIASES = {
-    # Independiente Santa Fe (Colombia) - ID real más común en API-Football
-    "independiente santa fe": 1137,
-    "santa fe": 1137,
-    "ind. santa fe": 1137,
-    "independiente santafe": 1137,
-    
-    # Deportes Tolima
+    # Colombia
     "tolima": 1142,
     "deportes tolima": 1142,
-    "deportes de tolima": 1142,
+    
+    # Puedes ir agregando aquí los que uses frecuentemente:
+    # "real madrid": 541,
+    # "barcelona": 529,
+    # "manchester city": 50,
+    # "boca juniors": 451,
+    # "river plate": 435,
+    # "flamengo": 127,
+    # "america": 2287,          # América México
+    # etc.
 }
 
-COLOMBIA_LEAGUE_ID = 239  # Primera A / Liga BetPlay (ajusta si usas otra temporada)
-
-# ====================== FUNCIONES DE UTILIDAD ======================
+# ====================== UTILIDADES ======================
 def determine_volatility(league_name: str) -> str:
-    league = league_name.lower()
-    if any(x in league for x in ["colombia", "betplay", "dimayor", "argentina", "liga profesional", "lpfe", "ecuador", "liga pro"]):
+    league = (league_name or "").lower()
+    
+    high_volatility = [
+        "colombia", "betplay", "dimayor",
+        "argentina", "liga profesional", "primera división",
+        "mexico", "liga mx", "ascenso",
+        "brazil", "brasil", "brasileirão", "serie a", "serie b"
+    ]
+    
+    medium_high = [
+        "portugal", "liga portugal", "segunda liga",
+        "turkey", "süper lig", "greece", "super league"
+    ]
+    
+    if any(x in league for x in high_volatility):
         return "Alta"
-    if any(x in league for x in ["brasil", "brazil", "brasileirão", "serie a brazil", "serie a betano"]):
+    if any(x in league for x in medium_high):
         return "Media-Alta"
     return "Baja-Media"
 
@@ -59,19 +73,25 @@ def calculate_lambda(base_xg: float, is_home: bool = True, injury_impact: float 
     return round(max(0.55, min(lambda_val, 2.45)), 3)
 
 def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
-    league = league.lower()
-    if "colombia" in league or "betplay" in league:
+    league = (league or "").lower()
+    
+    if any(x in league for x in ["colombia", "betplay", "dimayor"]):
         return 1.18 if is_home else 1.05
-    if "argentina" in league:
+    if any(x in league for x in ["argentina", "liga profesional"]):
         return 1.15 if is_home else 1.02
-    if "ecuador" in league:
-        return 1.20 if is_home else 1.08
-    if "brasil" in league or "brazil" in league:
+    if any(x in league for x in ["mexico", "liga mx"]):
+        return 1.22 if is_home else 1.08
+    if any(x in league for x in ["brazil", "brasil", "brasileirão"]):
         return 1.28 if is_home else 1.12
+    if any(x in league for x in ["portugal", "liga portugal"]):
+        return 1.35 if is_home else 1.15
+    if any(x in league for x in ["premier", "la liga", "serie a", "bundesliga"]):
+        return 1.45 if is_home else 1.25
+    
+    # Default neutral
     return 1.25 if is_home else 1.10
 
 def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
-    """Request con reintentos y manejo limpio de errores de API-Football"""
     for attempt in range(max_retries):
         try:
             res = requests.get(url, headers=HEADERS_API, timeout=20)
@@ -88,66 +108,77 @@ def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
             else:
                 raise
 
-# ====================== BUSCADOR DE EQUIPOS DEFINITIVO ======================
-def search_team_id(team_target: str, preferred_country: str = "Colombia") -> Tuple[int, str]:
+# ====================== BUSCADOR UNIVERSAL (SIN SESGO) ======================
+def search_team_id(team_target: str) -> Tuple[int, str]:
     target_lower = team_target.lower().strip()
     
-    # 1. Alias directo (prioridad máxima)
+    # 1. Alias verificado
     if target_lower in TEAM_ALIASES:
         team_id = TEAM_ALIASES[target_lower]
-        print(f"⚡ Usando alias directo para '{team_target}' (ID: {team_id})")
+        print(f"⚡ Usando alias verificado para '{team_target}' (ID: {team_id})")
         data = safe_request(f"https://v3.football.api-sports.io/teams?id={team_id}")
         if data.get("response"):
             team = data["response"][0]["team"]
             return team["id"], team["name"]
     
-    # 2. Búsqueda textual inteligente
-    queries = list(dict.fromkeys([
-        team_target,
-        team_target.replace("Independiente ", "").replace("Deportes ", "").strip(),
-        " ".join(team_target.split()[-2:]) if len(team_target.split()) > 2 else team_target
-    ]))
+    # 2. Búsqueda textual limpia
+    print(f"🔍 Buscando: '{team_target}'...")
+    data = safe_request(f"https://v3.football.api-sports.io/teams?search={team_target}")
     
-    candidates = []
-    for q in queries:
-        print(f"🔍 Buscando: '{q}'...")
-        data = safe_request(f"https://v3.football.api-sports.io/teams?search={q}")
-        for item in data.get("response", []):
-            team = item["team"]
-            country = item.get("team", {}).get("country") or item.get("country", {}).get("name", "")
-            candidates.append({
-                "id": team["id"],
-                "name": team["name"],
-                "country": country,
-                "score": 0
-            })
+    candidates: List[Dict] = []
+    
+    for item in data.get("response", []):
+        team = item["team"]
+        name = team["name"]
+        country = team.get("country", "Unknown")
+        name_lower = name.lower()
+        
+        score = 0
+        
+        # Matching exacto / parcial
+        if target_lower == name_lower:
+            score += 100
+        elif target_lower in name_lower:
+            score += 60
+        elif name_lower in target_lower:
+            score += 40
+        
+        # Bonus por palabras clave importantes
+        keywords = target_lower.split()
+        matched_keywords = sum(1 for k in keywords if k in name_lower)
+        score += matched_keywords * 15
+        
+        candidates.append({
+            "id": team["id"],
+            "name": name,
+            "country": country,
+            "score": score
+        })
     
     if not candidates:
         raise ValueError(f"No se encontró ningún equipo para '{team_target}'")
     
-    # Scoring inteligente: prioriza Colombia + nombre más parecido
-    for c in candidates:
-        score = 0
-        name_lower = c["name"].lower()
-        if preferred_country.lower() in c["country"].lower():
-            score += 100
-        if target_lower in name_lower or name_lower in target_lower:
-            score += 50
-        if "santa fe" in name_lower and "independiente" in name_lower:
-            score += 30
-        if "tolima" in name_lower:
-            score += 30
-        c["score"] = score
+    # Ordenar por score descendente
+    candidates.sort(key=lambda x: x["score"], reverse=True)
     
-    best = max(candidates, key=lambda x: x["score"])
-    print(f"✅ Mejor match: {best['name']} (ID: {best['id']}) | País: {best['country']} | Score: {best['score']}")
+    print(f"\n📋 Top candidatos para '{team_target}':")
+    for i, c in enumerate(candidates[:8], 1):
+        print(f"   {i}. {c['name']} (ID: {c['id']}) | {c['country']} | Score: {c['score']}")
+    
+    best = candidates[0]
+    
+    if best["score"] < 50:
+        print(f"\n⚠️ Score bajo ({best['score']}). Revisa los candidatos arriba.")
+    
+    print(f"\n✅ Seleccionado: {best['name']} (ID: {best['id']}) | País: {best['country']}")
     return best["id"], best["name"]
 
-# ====================== FIXTURE / H2H ======================
+# ====================== FIXTURE / H2H UNIVERSAL ======================
 def get_fixture_direct(home_target: str, away_target: str) -> Dict[str, Any]:
     home_id, home_real = search_team_id(home_target)
     away_id, away_real = search_team_id(away_target)
-    print(f"✅ Localizado: {home_real} (ID: {home_id}) vs {away_real} (ID: {away_id})")
+    
+    print(f"\n✅ Localizado: {home_real} (ID: {home_id}) vs {away_real} (ID: {away_id})")
     
     # 1. Intentar H2H
     print("🗓️ Buscando historial Head-to-Head...")
@@ -160,92 +191,16 @@ def get_fixture_direct(home_target: str, away_target: str) -> Dict[str, Any]:
         print(f"📌 Partido H2H más cercano encontrado (ID: {closest['fixture']['id']})")
         return closest
     
-    # 2. Fallback profesional: próximo partido entre estos equipos en la liga colombiana
-    print("⚠️ Sin H2H. Buscando próximo fixture en Liga BetPlay...")
-    fixtures_url = (
-        f"https://v3.football.api-sports.io/fixtures"
-        f"?team={home_id}&next=15&league={COLOMBIA_LEAGUE_ID}"
-    )
-    fixtures = safe_request(fixtures_url).get("response", [])
+    # 2. Fallback: próximos partidos de cualquiera de los dos equipos
+    print("⚠️ Sin H2H. Buscando próximo enfrentamiento entre ambos...")
     
-    for fix in fixtures:
-        teams = fix["teams"]
-        if (teams["home"]["id"] == home_id and teams["away"]["id"] == away_id) or \
-           (teams["home"]["id"] == away_id and teams["away"]["id"] == home_id):
-            print(f"📌 Fixture próximo encontrado (ID: {fix['fixture']['id']})")
-            return fix
-    
-    raise ValueError(
-        f"No hay historial H2H ni próximo partido programado entre {home_real} y {away_real}."
-    )
-
-def process_single_match(home_target: str, away_target: str):
-    try:
-        fixture = get_fixture_direct(home_target, away_target)
+    for team_id in [home_id, away_id]:
+        fixtures_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&next=30"
+        fixtures = safe_request(fixtures_url).get("response", [])
         
-        fix_id = str(fixture["fixture"]["id"])
-        home = fixture["teams"]["home"]["name"]
-        away = fixture["teams"]["away"]["name"]
-        league = fixture["league"]["name"]
-        kickoff = fixture["fixture"]["date"]
-        status_short = fixture["fixture"]["status"]["short"]
-        vol = determine_volatility(league)
-
-        print(f"📌 Partido capturado → ID: {fix_id} | {home} vs {away} | Estado: {status_short} | Liga: {league}")
-
-        l_home = calculate_lambda(estimate_base_xg(home, league, True), True, 0.0, vol)
-        l_away = calculate_lambda(estimate_base_xg(away, league, False), False, 0.0, vol)
-
-        record = {
-            "fixture_id": fix_id,
-            "home_team": home,
-            "away_team": away,
-            "league": league,
-            "kickoff": kickoff,
-            "volatility": vol,
-            "lambda_home": l_home,
-            "lambda_away": l_away,
-            "status": f"quant_processed_{status_short}",
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }
-
-        print("💾 Guardando en Supabase...")
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
-                break
-            except Exception as db_err:
-                if attempt < max_retries - 1:
-                    print(f"⚠️ Supabase latency (intento {attempt+1}). Reintentando...")
-                    time.sleep(4)
-                else:
-                    raise Exception(f"Fallo definitivo en BD: {db_err}")
-
-        print("🚀 Lanzando Monte Carlo (10k) en Vercel...")
-        v_res = requests.post(
-            VERCEL_API_URL,
-            json={
-                "home_team": home,
-                "away_team": away,
-                "lambda_home": l_home,
-                "lambda_away": l_away
-            },
-            timeout=30
-        )
-        
-        if v_res.status_code in (200, 201):
-            print("🏆 ¡Análisis cuantitativo completado!\n", json.dumps(v_res.json(), indent=2))
-        else:
-            print(f"⚠️ Error Vercel ({v_res.status_code}): {v_res.text}")
-
-    except Exception as e:
-        print(f"\n❌ Error en la tubería de datos: {e}")
-        raise
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("PIPELINE QUANT V6.4 – CORRECT IDs + SMART SEARCH + FALLBACK")
-    print("=" * 70)
-    process_single_match(TARGET_HOME, TARGET_AWAY)
-    print("=" * 70)
+        for fix in fixtures:
+            teams = fix["teams"]
+            if (teams["home"]["id"] == home_id and teams["away"]["id"] == away_id) or \
+               (teams["home"]["id"] == away_id and teams["away"]["id"] == home_id):
+                print(f"📌 Fixture próximo encontrado (ID: {fix['fixture']['id']})")
+               
