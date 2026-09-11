@@ -4,6 +4,7 @@ import time
 import json
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Tuple, Dict, Any, List
 from supabase import create_client, Client
 
@@ -28,11 +29,14 @@ HEADERS_API = {
     "Content-Type": "application/json",
 }
 
-# ====================== PARTIDO A PROCESAR ======================
-TARGET_HOME = "Independiente Santa Fe"
-TARGET_AWAY = "Tolima"
+BOGOTA_TZ = ZoneInfo("America/Bogota")
 
-# Aliases verificados (multi-liga). Agrega aquí los del torneo cuando los confirmes.
+# ====================== PARTIDO A PROCESAR ======================
+# Cambia solo estas 2 líneas para cada consulta nueva
+TARGET_HOME = os.getenv("TARGET_HOME", "Independiente Santa Fe")
+TARGET_AWAY = os.getenv("TARGET_AWAY", "Tolima")
+
+# Aliases verificados (multi-liga)
 TEAM_ALIASES = {
     # Colombia
     "independiente santa fe": 1139,
@@ -40,10 +44,9 @@ TEAM_ALIASES = {
     "tolima": 1142,
     "deportes tolima": 1142,
 
-    # Ejemplos multi-país (descomenta/agrega según uses):
+    # Agrega más del torneo cuando los confirmes:
     # "real madrid": 541,
     # "barcelona": 529,
-    # "manchester city": 50,
     # "porto": 212,
     # "benfica": 211,
     # "boca juniors": 451,
@@ -60,11 +63,28 @@ def normalize(text: str) -> str:
     return text
 
 
+def to_bogota_iso(dt_value) -> str:
+    """Convierte fecha ISO/UTC a hora de Bogotá."""
+    if dt_value is None:
+        return datetime.now(BOGOTA_TZ).isoformat()
+
+    if isinstance(dt_value, str):
+        raw = dt_value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+    else:
+        dt = dt_value
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(BOGOTA_TZ).isoformat()
+
+
 def determine_volatility(league_name: str) -> str:
     league = normalize(league_name)
 
     high = [
-        "colombia", "betplay", "dimayor",
+        "colombia", "betplay", "dimayor", "primera a",
         "argentina", "liga profesional",
         "mexico", "liga mx", "ascenso",
         "brazil", "brasil", "brasileirao", "serie a", "serie b",
@@ -81,7 +101,7 @@ def determine_volatility(league_name: str) -> str:
 def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
     league = normalize(league)
 
-    if any(x in league for x in ["colombia", "betplay", "dimayor"]):
+    if any(x in league for x in ["colombia", "betplay", "dimayor", "primera a"]):
         return 1.18 if is_home else 1.05
     if any(x in league for x in ["argentina", "liga profesional"]):
         return 1.15 if is_home else 1.02
@@ -119,7 +139,7 @@ def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
             if data.get("errors"):
                 print(f"⚠️ API Errors: {data['errors']}")
             return data
-        except Exception as e:
+        except Exception:
             if attempt < max_retries - 1:
                 wait = 2 ** attempt
                 print(f"⚠️ Request falló (intento {attempt+1}). Reintentando en {wait}s...")
@@ -142,7 +162,6 @@ def score_team_name(target: str, candidate_name: str) -> int:
     n_tokens = set(n.split())
     score += sum(18 for tok in t_tokens if tok in n_tokens)
 
-    # Penaliza confusiones típicas
     if "nacional" in n and "santa fe" in t:
         score -= 80
     if "leones negros" in n and "santa fe" in t:
@@ -171,7 +190,6 @@ def search_queries_for(team_target: str) -> List[str]:
 def search_team_id(team_target: str) -> Tuple[int, str]:
     target_lower = normalize(team_target)
 
-    # 1) Alias con validación de nombre
     if target_lower in TEAM_ALIASES:
         team_id = TEAM_ALIASES[target_lower]
         print(f"⚡ Probando alias para '{team_target}' (ID: {team_id})")
@@ -184,7 +202,6 @@ def search_team_id(team_target: str) -> Tuple[int, str]:
                 return team["id"], team["name"]
             print("   ⚠️ Alias no confiable, se busca por texto...")
 
-    # 2) Búsqueda multi-query (multi-país / multi-liga)
     candidates_map: Dict[int, Dict[str, Any]] = {}
 
     for q in search_queries_for(team_target):
@@ -264,42 +281,70 @@ def process_single_match(home_target: str, away_target: str):
         home = fixture["teams"]["home"]["name"]
         away = fixture["teams"]["away"]["name"]
         league = fixture["league"]["name"]
-        kickoff = fixture["fixture"]["date"]
+        kickoff_raw = fixture["fixture"]["date"]
         status_short = fixture["fixture"]["status"]["short"]
         vol = determine_volatility(league)
+
+        kickoff_bogota = to_bogota_iso(kickoff_raw)
+        consulta_bogota = to_bogota_iso(datetime.now(timezone.utc))
 
         print(f"\n📌 Partido capturado → ID: {fix_id}")
         print(f"   {home} vs {away}")
         print(f"   Estado: {status_short} | Liga: {league}")
+        print(f"   Kickoff Bogotá: {kickoff_bogota}")
+        print(f"   Consulta Bogotá: {consulta_bogota}")
 
         l_home = calculate_lambda(estimate_base_xg(home, league, True), True, 0.0, vol)
         l_away = calculate_lambda(estimate_base_xg(away, league, False), False, 0.0, vol)
 
-        record = {
+        # 1) Guardar en Partidos
+        record_partido = {
             "fixture_id": fix_id,
             "home_team": home,
             "away_team": away,
-            "league": league,
-            "kickoff": kickoff,
-            "volatility": vol,
+            "Liga": league,
+            "inicio": kickoff_bogota,
+            "volatilidad": vol,
             "lambda_home": l_home,
             "lambda_away": l_away,
-            "status": f"quant_processed_{status_short}",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "estado": f"quant_processed_{status_short}",
+            "updated_at": consulta_bogota,
         }
 
-        print("\n💾 Guardando métricas en Supabase...")
+        print("\n💾 Guardando métricas en Partidos...")
         for attempt in range(3):
             try:
-                supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
+                supabase.table("Partidos").upsert(
+                    record_partido, on_conflict="fixture_id"
+                ).execute()
                 break
             except Exception as db_err:
-                if attempt < 2:
-                    print(f"⚠️ Latencia Supabase (intento {attempt+1}). Reintentando...")
-                    time.sleep(4)
-                else:
-                    raise Exception(f"Fallo definitivo al guardar en BD: {db_err}")
+                # fallback por si la tabla se llama matches
+                try:
+                    supabase.table("matches").upsert(
+                        {
+                            "fixture_id": fix_id,
+                            "home_team": home,
+                            "away_team": away,
+                            "league": league,
+                            "kickoff": kickoff_bogota,
+                            "volatility": vol,
+                            "lambda_home": l_home,
+                            "lambda_away": l_away,
+                            "status": f"quant_processed_{status_short}",
+                            "updated_at": consulta_bogota,
+                        },
+                        on_conflict="fixture_id",
+                    ).execute()
+                    break
+                except Exception:
+                    if attempt < 2:
+                        print(f"⚠️ Latencia Supabase (intento {attempt+1}). Reintentando...")
+                        time.sleep(4)
+                    else:
+                        raise Exception(f"Fallo al guardar en Partidos/matches: {db_err}")
 
+        # 2) Monte Carlo en Vercel
         print("🚀 Lanzando simulación Monte Carlo (10k) en Vercel...")
         payload = {
             "fixture_id": fix_id,
@@ -311,15 +356,56 @@ def process_single_match(home_target: str, away_target: str):
             "lambda_away": l_away,
         }
 
+        pred = None
         try:
             v_res = requests.post(VERCEL_API_URL, json=payload, timeout=35)
             if v_res.status_code in (200, 201):
+                body = v_res.json()
                 print("🏆 ¡Análisis cuantitativo completado!\n")
-                print(json.dumps(v_res.json(), indent=2))
+                print(json.dumps(body, indent=2))
+                pred = body.get("prediction") or body
             else:
                 print(f"⚠️ Error Vercel ({v_res.status_code}): {v_res.text[:600]}")
         except Exception as ve:
             print(f"⚠️ Error llamando a Vercel: {ve}")
+
+        if not pred:
+            raise Exception("No se obtuvo predicción desde Vercel")
+
+        # 3) Guardar en Predicciones (formato de tu tabla)
+        prob_local = float(pred.get("prob_home", 0)) * 100
+        prob_empate = float(pred.get("prob_draw", 0)) * 100
+        prob_visita = float(pred.get("prob_away", 0)) * 100
+
+        avg_h = float(pred.get("avg_home_goals", l_home))
+        avg_a = float(pred.get("avg_away_goals", l_away))
+        top_marcador = f"{round(avg_h)}-{round(avg_a)}"
+
+        record_pred = {
+            "created_at": consulta_bogota,
+            "npxg_local": l_home,
+            "npxg_visita": l_away,
+            "prob_local": round(prob_local, 2),
+            "prob_empate": round(prob_empate, 2),
+            "prob_visita": round(prob_visita, 2),
+            "top_marcador": top_marcador,
+        }
+
+        print("💾 Guardando resultado en Predicciones...")
+        for attempt in range(3):
+            try:
+                supabase.table("Predicciones").insert(record_pred).execute()
+                break
+            except Exception as db_err:
+                if attempt < 2:
+                    print(f"⚠️ Latencia Supabase Predicciones (intento {attempt+1})...")
+                    time.sleep(4)
+                else:
+                    raise Exception(f"Fallo al guardar en Predicciones: {db_err}")
+
+        print("✅ Predicción guardada en Supabase (tabla Predicciones)")
+        print(f"   Horario partido (Bogotá): {kickoff_bogota}")
+        print(f"   Horario consulta (Bogotá): {consulta_bogota}")
 
     except Exception as e:
         print(f"\n❌ Error en la tubería de datos: {e}")
@@ -328,7 +414,7 @@ def process_single_match(home_target: str, away_target: str):
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("PIPELINE QUANT V6.7 – MULTI-LIGA + SEARCH ROBUSTO + FIXTURE_ID")
+    print("PIPELINE QUANT V6.8 – PREDICCIONES + HORA BOGOTÁ")
     print("=" * 75)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 75)
