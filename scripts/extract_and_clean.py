@@ -1,5 +1,6 @@
 import os
 import requests
+import time
 import json
 from datetime import datetime
 from supabase import create_client, Client
@@ -68,7 +69,6 @@ def get_fixture_direct(home_target: str, away_target: str) -> dict:
         raise ValueError(f"No hay historial H2H entre {home_real} y {away_real}.")
         
     now = datetime.utcnow().timestamp()
-    # Encuentra el partido cuya diferencia de tiempo con el momento actual sea la menor (absoluta)
     return min(matches, key=lambda x: abs(x["fixture"]["timestamp"] - now))
 
 def process_single_match(home_target: str, away_target: str):
@@ -95,7 +95,19 @@ def process_single_match(home_target: str, away_target: str):
         }
 
         print("💾 Guardando métricas en Supabase...")
-        supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
+        
+        # Sistema de reintentos para evitar fallos por 504 Timeout
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
+                break # Si tiene éxito, rompe el bucle
+            except Exception as db_err:
+                if attempt < max_retries - 1:
+                    print(f"⚠️ Latencia en Supabase (Intento {attempt + 1}/{max_retries}). Reintentando en 5s...")
+                    time.sleep(5)
+                else:
+                    raise Exception(f"Fallo definitivo al guardar en BD: {db_err}")
         
         print("🚀 Desplegando simulación Monte Carlo (10k) en Vercel...")
         v_res = requests.post(VERCEL_API_URL, json={"home_team": home, "away_team": away, "lambda_home": l_home, "lambda_away": l_away}, timeout=25)
@@ -110,7 +122,7 @@ def process_single_match(home_target: str, away_target: str):
 
 if __name__ == "__main__":
     print("=" * 65)
-    print("PIPELINE QUANT V6.2 - H2H TIMESTAMP MATCHING")
+    print("PIPELINE QUANT V6.3 - H2H TIMESTAMP MATCHING & RETRIES")
     print("=" * 65)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 65)
