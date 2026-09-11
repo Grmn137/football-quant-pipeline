@@ -1,4 +1,3 @@
-// Función para calcular factoriales necesarios en la distribución de Poisson
 function factorial(n) {
   if (n === 0 || n === 1) return 1;
   let acc = 1;
@@ -53,18 +52,22 @@ module.exports = async (req, res) => {
     const pAwayPct = Number((probAwayWin * 100).toFixed(2));
     const topMarcadorStr = topScores.length > 0 ? topScores[0].marcador : "0-0";
 
-    // Guardar en Supabase usando fetch nativo si las credenciales existen
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
+    let dbResponseStatus = "No intentado";
+    let dbErrorDetails = null;
+
     if (supabaseUrl && supabaseKey) {
-      await fetch(`${supabaseUrl}/rest/v1/predictions`, {
+      const cleanUrl = supabaseUrl.replace(/\/$/, "");
+      
+      const dbResponse = await fetch(`${cleanUrl}/rest/v1/predictions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
-          'Prefer': 'return=minimal'
+          'Prefer': 'return=representation'
         },
         body: JSON.stringify({
           npxg_local: lambdaLocal,
@@ -75,14 +78,19 @@ module.exports = async (req, res) => {
           top_marcador: topMarcadorStr
         })
       });
+
+      dbResponseStatus = dbResponse.status;
+      if (!dbResponse.ok) {
+        dbErrorDetails = await dbResponse.text();
+      }
     }
 
     return res.status(200).json({
       status: "success",
-      engine: "Native Node.js Poisson + Supabase DB",
-      expected_goals_ajustados: {
-        local: Number(lambdaLocal.toFixed(2)),
-        visita: Number(lambdaVisita.toFixed(2))
+      engine: "Native Node.js Poisson",
+      db_debug: {
+        http_status: dbResponseStatus,
+        error: dbErrorDetails
       },
       probabilidades_1x2: {
         local_porcentaje: pLocalPct,
@@ -95,7 +103,7 @@ module.exports = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       status: "error",
-      message: "Fallo en el cálculo o guardado en base de datos",
+      message: "Fallo general en la ejecución",
       details: error.message
     });
   }
