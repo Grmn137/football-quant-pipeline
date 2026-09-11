@@ -1,11 +1,9 @@
 import os
 import requests
 import time
-import difflib
 import json
 from datetime import datetime
 from supabase import create_client, Client
-from typing import Dict, Optional
 
 # ====================== CONFIGURACIÓN ======================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -59,7 +57,7 @@ def estimate_base_xg(team_name: str, league: str, is_home: bool) -> float:
         return 1.25 if is_home else 1.10
 
 
-# ====================== MOTOR DE BÚSQUEDA ELITE (HÍBRIDO) ======================
+# ====================== BUSCADOR MAESTRO POR ID ======================
 
 def search_team_id(team_target: str) -> tuple:
     clean_target = team_target.replace("Stade ", "").replace("FC ", "").replace("Club ", "").strip()
@@ -76,45 +74,41 @@ def search_team_id(team_target: str) -> tuple:
             
     raise ValueError(f"No se pudo encontrar el equipo '{team_target}' en la API.")
 
-def fuzzy_match(target: str, name: str) -> bool:
-    t_clean = target.lower().strip()
-    n_clean = name.lower().strip()
-    if t_clean in n_clean or n_clean in t_clean:
-        return True
-    return difflib.SequenceMatcher(None, t_clean, n_clean).ratio() > 0.45
-
-def get_fixture_by_names(home_target: str, away_target: str) -> dict:
+def get_fixture_direct(home_target: str, away_target: str) -> dict:
     if not API_FOOTBALL_KEY:
         raise ValueError("ERROR: API_FOOTBALL_KEY no configurada.")
 
     home_id, home_real = search_team_id(home_target)
     away_id, away_real = search_team_id(away_target)
-    print(f"✅ Localizado: {home_real} (ID: {home_id}) vs {away_real} (ID: {away_id})")
+    print(f"✅ Localizado con éxito: {home_real} (ID: {home_id}) vs {away_real} (ID: {away_id})")
     
-    # ESTRATEGIA HÍBRIDA: Buscamos tanto en partidos en vivo/hoy como en los próximos del calendario
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    # Consultamos tanto los últimos partidos recientes (por si ya arrancó/terminó hace poco) como los siguientes
     endpoints = [
-        f"https://v3.football.api-sports.io/fixtures?team={home_id}&date={today_str}", # Partidos de hoy (en vivo o por jugar)
-        f"https://v3.football.api-sports.io/fixtures?team={home_id}&next=25"          # Próximos partidos
+        f"https://v3.football.api-sports.io/fixtures?team={home_id}&last=10",
+        f"https://v3.football.api-sports.io/fixtures?team={home_id}&next=20"
     ]
     
+    found_matches = []
     for fix_url in endpoints:
-        print(f"🗓️ Consultando calendario (Endpoint: {'hoy' if 'date' in fix_url else 'próximos'})...")
         fix_res = requests.get(fix_url, headers=HEADERS_API, timeout=15).json()
-        
         for match in fix_res.get("response", []):
             m_home_id = match["teams"]["home"]["id"]
             m_away_id = match["teams"]["away"]["id"]
             
-            if (m_home_id == home_id and m_away_id == away_id) or \
-               (fuzzy_match(away_target, match["teams"]["home"]["name"]) or fuzzy_match(away_target, match["teams"]["away"]["name"])):
-                return match
-                
-    raise ValueError(f"No se encontró un partido activo o próximo programado entre {home_real} y {away_real}.")
+            # Verificamos si en este partido participan exactamente ambos equipos (como local o visitante)
+            if {m_home_id, m_away_id} == {home_id, away_id}:
+                found_matches.append(match)
+
+    if found_matches:
+        # Ordenamos por fecha y devolvemos el más relevante (el actual o más cercano)
+        found_matches.sort(key=lambda x: x["fixture"]["timestamp"])
+        return found_matches[0]
+            
+    raise ValueError(f"No se encontró el enfrentamiento directo entre {home_real} y {away_real} en el rango consultado.")
 
 def process_single_match(home_target: str, away_target: str):
     try:
-        fixture = get_fixture_by_names(home_target, away_target)
+        fixture = get_fixture_direct(home_target, away_target)
         
         fixture_id = str(fixture["fixture"]["id"])
         home = fixture["teams"]["home"]["name"]
@@ -124,7 +118,7 @@ def process_single_match(home_target: str, away_target: str):
         status_short = fixture["fixture"]["status"]["short"]
         volatility = determine_volatility(league)
 
-        print(f"📌 Estado actual del partido en la API: {status_short}")
+        print(f"📌 Partido encontrado ID: {fixture_id} | Estado: {status_short} | Competencia: {league}")
 
         npxg_home = estimate_base_xg(home, league, is_home=True)
         npxg_away = estimate_base_xg(away, league, is_home=False)
@@ -146,7 +140,7 @@ def process_single_match(home_target: str, away_target: str):
 
         print(f"💾 Guardando métricas en Supabase...")
         supabase.table("matches").upsert(record, on_conflict="fixture_id").execute()
-        print(f"   ✓ Partido: {home} vs {away} | Liga: {league} | λ: {lambda_home} - {lambda_away}")
+        print(f"   ✓ Partido: {home} vs {away} | λ: {lambda_home} - {lambda_away}")
 
         print(f"🚀 Desplegando simulación Monte Carlo (10k) en Vercel...")
         vercel_payload = {
@@ -168,7 +162,7 @@ def process_single_match(home_target: str, away_target: str):
 
 def main():
     print("=" * 65)
-    print(f"PIPELINE QUANT V6.1 - BUSCADOR HÍBRIDO (EN VIVO / PRE-PARTIDO)")
+    print(f"PIPELINE QUANT V6.1 - BUSCADOR DIRECTO POR IDs")
     print("=" * 65)
     process_single_match(TARGET_HOME, TARGET_AWAY)
     print("=" * 65)
