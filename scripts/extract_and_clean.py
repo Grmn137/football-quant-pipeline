@@ -3,6 +3,7 @@ import requests
 import time
 import json
 import re
+import math
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Tuple, Dict, Any, List, Optional
@@ -42,9 +43,9 @@ XG_MAX_AGE_HOURS = int(os.getenv("XG_MAX_AGE_HOURS", "36"))
 
 # Overrides opcionales de npxG real (Understat/manual)
 NPxG_HOME = os.getenv("NPXG_HOME")
-NPxGA_HOME = os.getenv("NPXGA_HOME")
-NPxG_AWAY = os.getenv("NPXG_AWAY")
-NPxGA_AWAY = os.getenv("NPXGA_AWAY")
+NPxGA_HOME = os.getenv("NPxGA_HOME")
+NPxG_AWAY = os.getenv("NPxG_AWAY")
+NPxGA_AWAY = os.getenv("NPxGA_AWAY")
 
 if not API_FOOTBALL_KEY:
     raise ValueError("Falta API_FOOTBALL_KEY")
@@ -61,8 +62,8 @@ HEADERS_API = {
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 np.random.seed(RANDOM_SEED)
 
-TARGET_HOME = os.getenv("TARGET_HOME", "Independiente Santa Fe")
-TARGET_AWAY = os.getenv("TARGET_AWAY", "Tolima")
+TARGET_HOME = os.getenv("TARGET_HOME", "Borussia Dortmund")
+TARGET_AWAY = os.getenv("TARGET_AWAY", "SC Paderborn 07")
 IS_BONUS = os.getenv("IS_BONUS", "false").lower() in ("1", "true", "yes", "si", "sí")
 
 TEAM_ALIASES = {
@@ -70,6 +71,11 @@ TEAM_ALIASES = {
     "santa fe": 1139,
     "tolima": 1142,
     "deportes tolima": 1142,
+    "borussia dortmund": 165,
+    "dortmund": 165,
+    "paderborn": 178,
+    "sc paderborn 07": 178,
+    "sc paderborn": 178,
 }
 
 EVENTS_CACHE: Dict[int, List[Dict[str, Any]]] = {}
@@ -152,10 +158,6 @@ def score_team_name(target: str, candidate_name: str) -> int:
     t_tokens = [x for x in t.split() if len(x) > 2]
     n_tokens = set(n.split())
     score += sum(18 for tok in t_tokens if tok in n_tokens)
-    if "nacional" in n and "santa fe" in t:
-        score -= 80
-    if "leones negros" in n and "santa fe" in t:
-        score -= 80
     return score
 
 
@@ -163,7 +165,7 @@ def search_queries_for(team_target: str) -> List[str]:
     t = team_target.strip()
     variants = [
         t,
-        t.replace("Independiente ", "").replace("Deportes ", "").strip(),
+        t.replace("Independiente ", "").replace("Deportes ", "").replace("SC ", "").strip(),
         " ".join(t.split()[-2:]) if len(t.split()) >= 2 else t,
         t.split()[0] if t.split() else t,
     ]
@@ -182,7 +184,7 @@ def search_team_id(team_target: str) -> Tuple[int, str]:
         data = safe_request(f"https://v3.football.api-sports.io/teams?id={team_id}")
         if data.get("response"):
             team = data["response"][0]["team"]
-            if score_team_name(team_target, team["name"]) >= 50:
+            if score_team_name(team_target, team["name"]) >= 40:
                 return team["id"], team["name"]
 
     candidates_map: Dict[int, Dict[str, Any]] = {}
@@ -207,7 +209,7 @@ def search_team_id(team_target: str) -> Tuple[int, str]:
         raise ValueError(f"No se encontró equipo para '{team_target}'")
 
     best = candidates[0]
-    if best["score"] < 40:
+    if best["score"] < 30:
         raise ValueError(f"Match poco confiable: {best['name']} score={best['score']}")
     log(f"✅ Seleccionado: {best['name']} (ID:{best['id']})")
     return best["id"], best["name"]
@@ -290,7 +292,6 @@ def analyze_match_anomalies(events: List[Dict[str, Any]], team_id: int) -> Dict[
 
 
 def red_penalty_factor(elapsed_min: Optional[int] = None) -> float:
-    """Determinista: <30 → 1.18 | 30-59 → 1.15"""
     if elapsed_min is None:
         return 1.15
     if elapsed_min < 30:
@@ -317,7 +318,6 @@ def earliest_red_minute(events: List[Dict[str, Any]], team_id: int) -> Optional[
 
 
 def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
-    """Proxy honestamente etiquetado (goles saneados + rojas + atípicos)."""
     fixtures = safe_request(
         f"https://v3.football.api-sports.io/fixtures?team={team_id}&last={last_n}"
     ).get("response", [])
@@ -533,7 +533,7 @@ def phase0_build_lambdas(
 
 # ====================== MOTOR 6.1 ======================
 def poisson_pmf(k: int, lam: float) -> float:
-    return float(np.exp(-lam) * (lam ** k) / np.math.factorial(k))
+    return float(np.exp(-lam) * (lam ** k) / math.factorial(k))
 
 
 def dixon_coles_tau(x: int, y: int, lam_h: float, lam_a: float, rho: float) -> float:
@@ -660,7 +660,7 @@ def insert_prediccion(record_pred: Dict[str, Any]) -> None:
     raise Exception(f"Fallo prediction: {last_err}")
 
 
-# ====================== PUNTO 4: MAIN ======================
+# ====================== MAIN ======================
 def process_single_match(home_target: str, away_target: str):
     fixture = get_fixture_direct(home_target, away_target)
 
@@ -682,8 +682,6 @@ def process_single_match(home_target: str, away_target: str):
     inj_h = float(os.getenv("INJURY_IMPACT_HOME", "0") or 0)
     inj_a = float(os.getenv("INJURY_IMPACT_AWAY", "0") or 0)
 
-    # 1) team_xg primero (DB → proxy)
-    # 2) λ limpios
     phase0 = phase0_build_lambdas(
         home_id=home_id,
         away_id=away_id,
@@ -694,7 +692,6 @@ def process_single_match(home_target: str, away_target: str):
         injury_impact_away=inj_a,
     )
 
-    # 3) Motor 6.1
     engine = run_engine_6_1(
         phase0["lambda_home"],
         phase0["lambda_away"],
