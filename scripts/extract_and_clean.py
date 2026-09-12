@@ -3,7 +3,7 @@ import requests
 import time
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Tuple, Dict, Any, List, Optional
 from supabase import create_client, Client
@@ -14,12 +14,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mqtfiupwtolrbmojiwgz.supabase.
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 
-# Modo de ejecución
-# PIPELINE = logs + Supabase
-# ENGINE_ONLY = SOLO la tabla obligatoria del prompt 6.1
+# PIPELINE = logs + Supabase | ENGINE_ONLY = solo tabla 6.1
 RUN_MODE = os.getenv("RUN_MODE", "PIPELINE").upper().strip()
 
-# Torneo
+# Puntos del torneo
 PTS_RESULTADO = float(os.getenv("PTS_RESULTADO", "3"))
 PTS_EXACTO = float(os.getenv("PTS_EXACTO", "5"))
 PTS_RESULTADO_BONUS = float(os.getenv("PTS_RESULTADO_BONUS", "5"))
@@ -29,27 +27,33 @@ N_SIMS = int(os.getenv("N_SIMS", "10000"))
 MAX_GOALS = int(os.getenv("MAX_GOALS", "6"))
 RANDOM_SEED = int(os.getenv("RANDOM_SEED", "42"))
 
-# Overrides opcionales de npxG reales (si los tienes de Understat/FBref/otro)
-# Si se setean, el motor NO usa proxy de goles.
+# team_xg
+XG_WINDOW = int(os.getenv("XG_WINDOW", "6"))
+XG_MAX_AGE_HOURS = int(os.getenv("XG_MAX_AGE_HOURS", "36"))
+
+# Overrides opcionales de npxG real (Understat/manual)
 NPxG_HOME = os.getenv("NPXG_HOME")
 NPxGA_HOME = os.getenv("NPXGA_HOME")
 NPxG_AWAY = os.getenv("NPXG_AWAY")
 NPxGA_AWAY = os.getenv("NPXGA_AWAY")
 
-if not all([SUPABASE_KEY, API_FOOTBALL_KEY]) and RUN_MODE == "PIPELINE":
-    raise ValueError("Faltan SUPABASE_SERVICE_ROLE_KEY o API_FOOTBALL_KEY")
+if not API_FOOTBALL_KEY:
+    raise ValueError("Falta API_FOOTBALL_KEY")
+
+if RUN_MODE == "PIPELINE" and not SUPABASE_KEY:
+    raise ValueError("Falta SUPABASE_SERVICE_ROLE_KEY para RUN_MODE=PIPELINE")
 
 supabase: Optional[Client] = None
 if SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 HEADERS_API = {
-    "x-apisports-key": API_FOOTBALL_KEY or "",
+    "x-apisports-key": API_FOOTBALL_KEY,
     "Content-Type": "application/json",
 }
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
-np.random.seed(RANDOM_SEED)  # reproducibilidad
+np.random.seed(RANDOM_SEED)
 
 TARGET_HOME = os.getenv("TARGET_HOME", "Independiente Santa Fe")
 TARGET_AWAY = os.getenv("TARGET_AWAY", "Tolima")
@@ -62,10 +66,10 @@ TEAM_ALIASES = {
     "deportes tolima": 1142,
 }
 
-# Cache in-memory de events (menos 429)
 EVENTS_CACHE: Dict[int, List[Dict[str, Any]]] = {}
 
-# ====================== LOG HELPERS ======================
+
+# ====================== LOG ======================
 def log(msg: str = "") -> None:
     if RUN_MODE != "ENGINE_ONLY":
         print(msg)
@@ -91,50 +95,24 @@ def to_bogota_iso(dt_value) -> str:
 
 # ====================== CALIBRACIÓN POR LIGA ======================
 def league_params(league_name: str) -> Dict[str, float]:
-    """
-    ρ Dixon-Coles y ventaja local por tipo de liga (no globales).
-    """
     league = normalize(league_name)
 
-    # Alta volatilidad LATAM
     if any(x in league for x in [
         "colombia", "betplay", "dimayor", "primera a",
-        "argentina", "liga profesional",
+        "argentina", "liga profesional", "copa argentina",
         "ecuador", "liga pro",
         "mexico", "liga mx",
         "brazil", "brasil", "brasileirao",
     ]):
-        return {
-            "volatility": "Alta",
-            "rho": -0.11,
-            "home_adv": 1.05,
-            "league_avg": 1.18,
-        }
+        return {"volatility": "Alta", "rho": -0.11, "home_adv": 1.05, "league_avg": 1.18}
 
-    # Portugal / secundarias europeas
     if any(x in league for x in ["portugal", "liga portugal", "segunda liga", "turkey", "greece"]):
-        return {
-            "volatility": "Media-Alta",
-            "rho": -0.13,
-            "home_adv": 1.07,
-            "league_avg": 1.25,
-        }
+        return {"volatility": "Media-Alta", "rho": -0.13, "home_adv": 1.07, "league_avg": 1.25}
 
-    # Big-5
     if any(x in league for x in ["premier", "la liga", "serie a", "bundesliga", "ligue 1"]):
-        return {
-            "volatility": "Baja-Media",
-            "rho": -0.14,
-            "home_adv": 1.09,
-            "league_avg": 1.35,
-        }
+        return {"volatility": "Baja-Media", "rho": -0.14, "home_adv": 1.09, "league_avg": 1.35}
 
-    return {
-        "volatility": "Baja-Media",
-        "rho": -0.13,
-        "home_adv": 1.07,
-        "league_avg": 1.22,
-    }
+    return {"volatility": "Baja-Media", "rho": -0.13, "home_adv": 1.07, "league_avg": 1.22}
 
 
 def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
@@ -157,7 +135,7 @@ def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
     return {"response": []}
 
 
-# ====================== TEAM / FIXTURE ======================
+# ====================== TEAMS / FIXTURES ======================
 def score_team_name(target: str, candidate_name: str) -> int:
     t, n = normalize(target), normalize(candidate_name)
     score = 0
@@ -256,23 +234,18 @@ def get_fixture_direct(home_target: str, away_target: str) -> Dict[str, Any]:
     raise ValueError(f"Sin H2H/próximo entre {home_real} y {away_real}")
 
 
-# ====================== EVENTS CACHE + ATÍPICOS ======================
+# ====================== EVENTS + ATÍPICOS ======================
 def get_fixture_events(fixture_id: int) -> List[Dict[str, Any]]:
     if fixture_id in EVENTS_CACHE:
         return EVENTS_CACHE[fixture_id]
     data = safe_request(f"https://v3.football.api-sports.io/fixtures/events?fixture={fixture_id}")
     events = data.get("response", []) or []
     EVENTS_CACHE[fixture_id] = events
-    time.sleep(0.35)  # rate-limit amable
+    time.sleep(0.35)
     return events
 
 
 def analyze_match_anomalies(events: List[Dict[str, Any]], team_id: int) -> Dict[str, Any]:
-    """
-    Detección más seria de atípicos:
-    - roja < 60'
-    - penales a favor/en contra (conteo)
-    """
     early_red = False
     penalties_for = 0
     penalties_against = 0
@@ -284,7 +257,6 @@ def analyze_match_anomalies(events: List[Dict[str, Any]], team_id: int) -> Dict[
             elapsed = ev.get("time", {}).get("elapsed")
             ev_team = ev.get("team", {}).get("id")
 
-            # Rojas
             if (
                 ev_team == team_id
                 and etype == "card"
@@ -294,7 +266,6 @@ def analyze_match_anomalies(events: List[Dict[str, Any]], team_id: int) -> Dict[
             ):
                 early_red = True
 
-            # Penales (Goal + Penalty, o var penalty)
             is_pen_goal = etype == "goal" and "penalty" in detail
             if is_pen_goal:
                 if ev_team == team_id:
@@ -313,12 +284,7 @@ def analyze_match_anomalies(events: List[Dict[str, Any]], team_id: int) -> Dict[
 
 
 def red_penalty_factor(elapsed_min: Optional[int] = None) -> float:
-    """
-    Factor DETERMINISTA (no random):
-    - roja muy temprana (<30): 1.18
-    - roja 30-59: 1.15
-    - default si solo sabemos <60: 1.15
-    """
+    """Determinista: <30 → 1.18 | 30-59 → 1.15"""
     if elapsed_min is None:
         return 1.15
     if elapsed_min < 30:
@@ -337,21 +303,15 @@ def earliest_red_minute(events: List[Dict[str, Any]], team_id: int) -> Optional[
             elapsed = ev.get("time", {}).get("elapsed")
             if elapsed is None:
                 continue
-            if etype == "card" and ("red" in detail or "second yellow" in detail):
-                if int(elapsed) < 60:
-                    mins.append(int(elapsed))
+            if etype == "card" and ("red" in detail or "second yellow" in detail) and int(elapsed) < 60:
+                mins.append(int(elapsed))
         except Exception:
             continue
     return min(mins) if mins else None
 
 
-# ====================== FASE 0 ======================
 def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
-    """
-    FUENTE DE DATOS (HONESTA):
-    - Por defecto: PROXY_GOALS (goles saneados), NO npxG real.
-    - Si API trae expected_goals en statistics, se intenta usar como soft-signal.
-    """
+    """Proxy honestamente etiquetado (goles saneados + rojas + atípicos)."""
     fixtures = safe_request(
         f"https://v3.football.api-sports.io/fixtures?team={team_id}&last={last_n}"
     ).get("response", [])
@@ -360,7 +320,6 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
     early_reds = 0
     multi_pen_games = 0
     used = 0
-    source = "PROXY_GOALS"
 
     for fx in fixtures:
         try:
@@ -379,13 +338,11 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
             events = get_fixture_events(fid)
             anomalies = analyze_match_anomalies(events, team_id)
 
-            # Roja < 60' determinista
             if anomalies["early_red"]:
                 early_reds += 1
                 minute = earliest_red_minute(events, team_id)
                 g_against *= red_penalty_factor(minute)
 
-            # Atípicos por penales múltiples: atenuar fuerte
             weight = 1.0
             if anomalies["multi_penalty_game"]:
                 multi_pen_games += 1
@@ -393,7 +350,6 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
             elif (anomalies["penalties_for"] + anomalies["penalties_against"]) >= 2:
                 weight *= 0.70
 
-            # Totales extremos
             total = g_for + g_against
             if total >= 7:
                 weight *= 0.50
@@ -413,7 +369,7 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
             "n": 0,
             "early_reds": 0,
             "multi_pen_games": 0,
-            "source": source,
+            "source": "proxy_goals",
         }
 
     return {
@@ -422,13 +378,89 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
         "n": used,
         "early_reds": early_reds,
         "multi_pen_games": multi_pen_games,
-        "source": source,
+        "source": "proxy_goals",
     }
 
 
+# ====================== PUNTO 2: team_xg ======================
+def get_team_xg_from_db(team_id: int, window_n: int = XG_WINDOW) -> Optional[Dict[str, Any]]:
+    if supabase is None:
+        return None
+    try:
+        res = (
+            supabase.table("team_xg")
+            .select("*")
+            .eq("team_id", str(team_id))
+            .eq("window_n", window_n)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return None
+
+        row = rows[0]
+        updated = row.get("updated_at")
+        if updated:
+            dt = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+            if age > timedelta(hours=XG_MAX_AGE_HOURS):
+                return None
+        return row
+    except Exception as e:
+        log(f"⚠️ No se pudo leer team_xg ({team_id}): {e}")
+        return None
+
+
+def upsert_team_xg(row: Dict[str, Any]) -> None:
+    if supabase is None:
+        return
+    try:
+        supabase.table("team_xg").upsert(row, on_conflict="team_id,window_n").execute()
+        log(f"✅ team_xg upsert: {row.get('team_name')} ({row.get('source')})")
+    except Exception as e:
+        log(f"⚠️ Fallo upsert team_xg: {e}")
+
+
+def build_proxy_team_xg(
+    team_id: int, team_name: str, league: str, window_n: int = XG_WINDOW
+) -> Dict[str, Any]:
+    metrics = fetch_recent_team_metrics(team_id, last_n=window_n)
+    return {
+        "team_id": str(team_id),
+        "team_name": team_name,
+        "league": league,
+        "window_n": window_n,
+        "npxg_for": round(float(metrics["gf"]), 3),
+        "npxga": round(float(metrics["ga"]), 3),
+        "sample_size": int(metrics.get("n", 0)),
+        "source": "proxy_goals",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def ensure_team_xg(
+    team_id: int, team_name: str, league: str, window_n: int = XG_WINDOW
+) -> Dict[str, Any]:
+    cached = get_team_xg_from_db(team_id, window_n)
+    if cached:
+        log(f"📥 XG cache hit: {team_name} | source={cached.get('source')}")
+        return cached
+
+    row = build_proxy_team_xg(team_id, team_name, league, window_n)
+    upsert_team_xg(row)
+    log(f"🧮 XG proxy: {team_name} | for={row['npxg_for']} against={row['npxga']}")
+    return row
+
+
+# ====================== PUNTO 3: FASE 0 ======================
 def phase0_build_lambdas(
     home_id: int,
     away_id: int,
+    home_name: str,
+    away_name: str,
     league: str,
     injury_impact_home: float = 0.0,
     injury_impact_away: float = 0.0,
@@ -439,24 +471,29 @@ def phase0_build_lambdas(
     league_avg = params["league_avg"]
     rho = params["rho"]
 
-    # --- npxG real por override (máxima prioridad) ---
     if all(v is not None for v in [NPxG_HOME, NPxGA_HOME, NPxG_AWAY, NPxGA_AWAY]):
-        npxg_h = float(NPxG_HOME)
-        npxga_h = float(NPxGA_HOME)
-        npxg_a = float(NPxG_AWAY)
-        npxga_a = float(NPxGA_AWAY)
+        home_x = {
+            "npxg_for": float(NPxG_HOME),
+            "npxga": float(NPxGA_HOME),
+            "source": "manual",
+            "sample_size": -1,
+        }
+        away_x = {
+            "npxg_for": float(NPxG_AWAY),
+            "npxga": float(NPxGA_AWAY),
+            "source": "manual",
+            "sample_size": -1,
+        }
         source = "REAL_NPXG_OVERRIDE"
-        home_form = {"gf": npxg_h, "ga": npxga_h, "n": -1, "early_reds": 0, "multi_pen_games": 0, "source": source}
-        away_form = {"gf": npxg_a, "ga": npxga_a, "n": -1, "early_reds": 0, "multi_pen_games": 0, "source": source}
     else:
-        home_form = fetch_recent_team_metrics(home_id, 6)
-        away_form = fetch_recent_team_metrics(away_id, 6)
-        source = "PROXY_GOALS"
+        home_x = ensure_team_xg(home_id, home_name, league)
+        away_x = ensure_team_xg(away_id, away_name, league)
+        source = f"{home_x.get('source')}+{away_x.get('source')}"
 
-    att_home = home_form["gf"] / league_avg
-    def_home = home_form["ga"] / league_avg
-    att_away = away_form["gf"] / league_avg
-    def_away = away_form["ga"] / league_avg
+    att_home = float(home_x["npxg_for"]) / league_avg
+    def_home = float(home_x["npxga"]) / league_avg
+    att_away = float(away_x["npxg_for"]) / league_avg
+    def_away = float(away_x["npxga"]) / league_avg
 
     base_home = att_home * def_away * league_avg
     base_away = att_away * def_home * league_avg
@@ -464,22 +501,14 @@ def phase0_build_lambdas(
     lambda_home = float(np.clip(base_home * home_adv + injury_impact_home, 0.55, 2.60))
     lambda_away = float(np.clip(base_away + injury_impact_away, 0.45, 2.40))
 
-    log("\n===== FASE 0 DECLARADA =====")
+    log("\n===== FASE 0 (team_xg primero) =====")
     log(f"data_source: {source}")
-    log(f"Liga: {league} | Volatilidad: {vol} | BONUS: {IS_BONUS}")
-    log(f"rho: {rho} | home_adv: {home_adv} | league_avg: {league_avg}")
-    log(
-        f"Local  att/def proxy n={home_form['n']} reds={home_form['early_reds']} multipen={home_form['multi_pen_games']}: "
-        f"{home_form['gf']:.3f}/{home_form['ga']:.3f}"
-    )
-    log(
-        f"Visita att/def proxy n={away_form['n']} reds={away_form['early_reds']} multipen={away_form['multi_pen_games']}: "
-        f"{away_form['gf']:.3f}/{away_form['ga']:.3f}"
-    )
+    log(f"Liga: {league} | Vol: {vol} | rho={rho} | home_adv={home_adv}")
+    log(f"Home XG: for={home_x['npxg_for']} against={home_x['npxga']} | src={home_x.get('source')}")
+    log(f"Away XG: for={away_x['npxg_for']} against={away_x['npxga']} | src={away_x.get('source')}")
     log(f"Impacto bajas L/V: {injury_impact_home}/{injury_impact_away}")
-    log(f"λ_local = {lambda_home:.3f}")
-    log(f"λ_visitante = {lambda_away:.3f}")
-    log("============================\n")
+    log(f"λ_local={lambda_home:.3f} | λ_visitante={lambda_away:.3f}")
+    log("===================================\n")
 
     return {
         "lambda_home": round(lambda_home, 3),
@@ -488,8 +517,8 @@ def phase0_build_lambdas(
         "rho": rho,
         "home_adv": home_adv,
         "data_source": source,
-        "home_form": home_form,
-        "away_form": away_form,
+        "home_xg": home_x,
+        "away_xg": away_x,
         "is_bonus": IS_BONUS,
         "injury_impact_home": injury_impact_home,
         "injury_impact_away": injury_impact_away,
@@ -529,7 +558,6 @@ def build_score_matrix(lam_h: float, lam_a: float, rho: float, max_goals: int) -
 
 
 def monte_carlo_from_matrix(mat: np.ndarray, n_sims: int) -> Dict[str, Any]:
-    # seed ya fijada globalmente
     flat = mat.ravel()
     draws = np.random.choice(np.arange(flat.size), size=n_sims, p=flat)
     max_g = mat.shape[0]
@@ -559,14 +587,16 @@ def compute_expected_points(mat: np.ndarray, volatility: str, is_bonus: bool) ->
             p_exact = float(mat[i, j])
             p_1x2 = p_home if i > j else p_draw if i == j else p_away
             ev = p_exact * pts_ex + p_1x2 * pts_res
-            if volatility == "Alta" and (i + j) >= 4:  # proxy >= 3.5
+            if volatility == "Alta" and (i + j) >= 4:
                 ev *= 0.85
             rows.append({"score": f"{i}-{j}", "p_exact": p_exact, "p_1x2": p_1x2, "ev": ev})
     rows.sort(key=lambda x: x["ev"], reverse=True)
     return rows
 
 
-def run_engine_6_1(lam_h: float, lam_a: float, volatility: str, is_bonus: bool, rho: float) -> Dict[str, Any]:
+def run_engine_6_1(
+    lam_h: float, lam_a: float, volatility: str, is_bonus: bool, rho: float
+) -> Dict[str, Any]:
     log("🧮 Motor 6.1 reproducible (seed fija)")
     mat = build_score_matrix(lam_h, lam_a, rho, MAX_GOALS)
     mc = monte_carlo_from_matrix(mat, N_SIMS)
@@ -624,7 +654,7 @@ def insert_prediccion(record_pred: Dict[str, Any]) -> None:
     raise Exception(f"Fallo prediction: {last_err}")
 
 
-# ====================== MAIN ======================
+# ====================== PUNTO 4: MAIN ======================
 def process_single_match(home_target: str, away_target: str):
     fixture = get_fixture_direct(home_target, away_target)
 
@@ -646,7 +676,19 @@ def process_single_match(home_target: str, away_target: str):
     inj_h = float(os.getenv("INJURY_IMPACT_HOME", "0") or 0)
     inj_a = float(os.getenv("INJURY_IMPACT_AWAY", "0") or 0)
 
-    phase0 = phase0_build_lambdas(home_id, away_id, league, inj_h, inj_a)
+    # 1) team_xg primero (DB → proxy)
+    # 2) λ limpios
+    phase0 = phase0_build_lambdas(
+        home_id=home_id,
+        away_id=away_id,
+        home_name=home,
+        away_name=away,
+        league=league,
+        injury_impact_home=inj_h,
+        injury_impact_away=inj_a,
+    )
+
+    # 3) Motor 6.1
     engine = run_engine_6_1(
         phase0["lambda_home"],
         phase0["lambda_away"],
@@ -679,7 +721,6 @@ def process_single_match(home_target: str, away_target: str):
         })
         log(json.dumps({"phase0": phase0, "engine": engine}, indent=2, default=str))
 
-    # Salida obligatoria 6.1 (siempre)
     bonus_tag = " (BONUS)" if IS_BONUS else ""
     if RUN_MODE == "ENGINE_ONLY":
         print("Partido,1° más probable,2° más probable")
@@ -692,7 +733,7 @@ def process_single_match(home_target: str, away_target: str):
 if __name__ == "__main__":
     if RUN_MODE != "ENGINE_ONLY":
         print("=" * 75)
-        print("PIPELINE QUANT V7.2 – correcciones 90+ / motor 6.1")
+        print("PIPELINE QUANT V7.3 – team_xg + motor 6.1 auditado")
         print("=" * 75)
     try:
         process_single_match(TARGET_HOME, TARGET_AWAY)
