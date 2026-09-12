@@ -1,3 +1,8 @@
+Aquí tienes el script completo con la trampa de errores inyectada en la sección de configuración y la indentación estandarizada (se limpiaron los espacios invisibles problemáticos de tu copia original para evitar `IndentationError`).
+
+Copia y pega este código exactamente como está. Si el error persiste en GitHub Actions, los logs te imprimirán el mensaje rojo exacto indicando si la variable llega vacía o si el formato del texto guardado es incorrecto.
+
+```python
 import os
 import requests
 import time
@@ -16,6 +21,15 @@ API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 
 # PIPELINE = logs + Supabase | ENGINE_ONLY = solo tabla 6.1
 RUN_MODE = os.getenv("RUN_MODE", "PIPELINE").upper().strip()
+
+# --- TRAMPA DE ERRORES SUPABASE ---
+if RUN_MODE == "PIPELINE":
+    print(f"🔍 [DIAGNÓSTICO] Verificando URL: {SUPABASE_URL}")
+    if not SUPABASE_KEY:
+        raise ValueError("❌ LA LLAVE ESTÁ VACÍA: El archivo .yml no está inyectando la variable o el secreto no existe en GitHub.")
+    if not SUPABASE_KEY.startswith("eyJ"):
+        raise ValueError(f"❌ LLAVE INVÁLIDA: El texto guardado en GitHub ({SUPABASE_KEY[:5]}...) no es un token JWT (debe empezar con eyJ...). Verifica qué copiaste.")
+# ----------------------------------
 
 # Puntos del torneo
 PTS_RESULTADO = float(os.getenv("PTS_RESULTADO", "3"))
@@ -39,9 +53,6 @@ NPxGA_AWAY = os.getenv("NPXGA_AWAY")
 
 if not API_FOOTBALL_KEY:
     raise ValueError("Falta API_FOOTBALL_KEY")
-
-if RUN_MODE == "PIPELINE" and not SUPABASE_KEY:
-    raise ValueError("Falta SUPABASE_SERVICE_ROLE_KEY para RUN_MODE=PIPELINE")
 
 supabase: Optional[Client] = None
 if SUPABASE_KEY:
@@ -745,3 +756,5 @@ if __name__ == "__main__":
             raise
     if RUN_MODE != "ENGINE_ONLY":
         print("=" * 75)
+
+```
