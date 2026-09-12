@@ -28,6 +28,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TARGET_HOME: ${{ vars.TARGET_HOME }}
+          TARGET_AWAY: ${{ vars.TARGET_AWAY }}
           PYTHONUNBUFFERED: "1"
         run: |
           python scripts/extract_and_clean.py
