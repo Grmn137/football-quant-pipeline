@@ -137,7 +137,7 @@ def safe_request(url: str, max_retries: int = 3) -> Dict[str, Any]:
             res.raise_for_status()
             data = res.json()
             if data.get("errors"):
-                log(f"⚠️ API Errors: {data['errors']}")
+                log(f"⚠️ API Errors/Warnings: {data['errors']}")
             return data
         except Exception:
             if attempt < max_retries - 1:
@@ -318,16 +318,30 @@ def earliest_red_minute(events: List[Dict[str, Any]], team_id: int) -> Optional[
 
 
 def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
-    fixtures = safe_request(
-        f"https://v3.football.api-sports.io/fixtures?team={team_id}&last={last_n}"
-    ).get("response", [])
+    # Usamos el año actual para pedir la temporada en lugar del parámetro 'last'
+    current_year = datetime.now(timezone.utc).year
+    
+    data = safe_request(
+        f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={current_year}"
+    )
+    fixtures = data.get("response", [])
+    
+    # Filtrar solo partidos finalizados ('FT', 'AET', 'PEN')
+    finished_fixtures = [
+        fx for fx in fixtures 
+        if fx.get("fixture", {}).get("status", {}).get("short") in ["FT", "AET", "PEN"]
+    ]
+    
+    # Ordenar por timestamp de forma descendente (más recientes primero) y tomar los últimos N
+    finished_fixtures.sort(key=lambda x: x["fixture"]["timestamp"], reverse=True)
+    selected_fixtures = finished_fixtures[:last_n]
 
     gf_list, ga_list = [], []
     early_reds = 0
     multi_pen_games = 0
     used = 0
 
-    for fx in fixtures:
+    for fx in selected_fixtures:
         try:
             fid = int(fx["fixture"]["id"])
             home = fx["teams"]["home"]
@@ -384,7 +398,7 @@ def fetch_recent_team_metrics(team_id: int, last_n: int = 6) -> Dict[str, Any]:
         "n": used,
         "early_reds": early_reds,
         "multi_pen_games": multi_pen_games,
-        "source": "proxy_goals",
+        "source": "proxy_season_filtered",
     }
 
 
@@ -442,7 +456,7 @@ def build_proxy_team_xg(
         "npxg_for": round(float(metrics["gf"]), 3),
         "npxga": round(float(metrics["ga"]), 3),
         "sample_size": int(metrics.get("n", 0)),
-        "source": "proxy_goals",
+        "source": metrics.get("source", "proxy_goals"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
