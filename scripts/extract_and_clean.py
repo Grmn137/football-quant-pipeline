@@ -1,8 +1,3 @@
-Aquí tienes el script completo con la trampa de errores inyectada en la sección de configuración y la indentación estandarizada (se limpiaron los espacios invisibles problemáticos de tu copia original para evitar `IndentationError`).
-
-Copia y pega este código exactamente como está. Si el error persiste en GitHub Actions, los logs te imprimirán el mensaje rojo exacto indicando si la variable llega vacía o si el formato del texto guardado es incorrecto.
-
-```python
 import os
 import requests
 import time
