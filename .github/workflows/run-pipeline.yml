@@ -2,11 +2,29 @@ name: Football Quant Pipeline
 
 on:
   workflow_dispatch:  # Ejecución manual
+    inputs:
+      target_home:
+        description: "Equipo Local"
+        required: true
+        default: "Borussia Dortmund"
+      target_away:
+        description: "Equipo Visitante"
+        required: true
+        default: "SC Paderborn 07"
+      is_bonus:
+        description: "¿Es partido Bonus? (true/false)"
+        required: false
+        default: "false"
+      run_mode:
+        description: "PIPELINE o ENGINE_ONLY"
+        required: false
+        default: "ENGINE_ONLY"
+
   schedule:
     - cron: "0 10 * * *"  # 10:00 UTC diario
 
 jobs:
-  run-python-script:
+  run-prediction-engine:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,13 +41,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run extraction and cleaning script
+      - name: Run Prediction Engine (Prompt 5.9)
         env:
+          # Secrets
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          TARGET_HOME: ${{ vars.TARGET_HOME }}
-          TARGET_AWAY: ${{ vars.TARGET_AWAY }}
+
+          # Inputs del workflow (manual) o variables del repositorio
+          TARGET_HOME: ${{ github.event.inputs.target_home || vars.TARGET_HOME }}
+          TARGET_AWAY: ${{ github.event.inputs.target_away || vars.TARGET_AWAY }}
+          IS_BONUS: ${{ github.event.inputs.is_bonus || vars.IS_BONUS || 'false' }}
+          RUN_MODE: ${{ github.event.inputs.run_mode || 'ENGINE_ONLY' }}
+
           PYTHONUNBUFFERED: "1"
         run: |
+          echo "▶ Ejecutando motor Prompt 5.9"
+          echo "Home: $TARGET_HOME"
+          echo "Away: $TARGET_AWAY"
+          echo "Bonus: $IS_BONUS"
+          echo "Mode: $RUN_MODE"
           python scripts/extract_and_clean.py
